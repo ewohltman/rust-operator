@@ -8,10 +8,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
 
 jobs:
   check-and-test:
-    name: Build, Lint & Test
+    name: Lint & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,10 +22,6 @@ jobs:
 
       - name: Install Rust toolchain & cache
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-          cache: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
