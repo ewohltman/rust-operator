@@ -24,9 +24,9 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
 
 ## Progress
 
-- [ ] 0. Prerequisites
-- [ ] 1. Local cluster and dependencies
-- [ ] 2. Connect to the cluster
+- [x] 0. Prerequisites
+- [x] 1. Local cluster and dependencies
+- [x] 2. Connect to the cluster
 - [ ] 3. Read typed resources
 - [ ] 4. Write resources with server-side apply
 - [ ] 5. Dynamic API and discovery (optional)
