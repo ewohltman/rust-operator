@@ -1285,6 +1285,7 @@ name = "rust-operator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "either",
  "futures",
  "k8s-openapi",
  "kube",
