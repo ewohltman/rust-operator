@@ -19,7 +19,7 @@ check: ## Fast compile check without generating binaries
 fmt: ## Format code with rustfmt
 	$(CARGO) fmt --all
 
-clippy: ## Run Clippy and fail on any warnings
+clippy: fmt ## Run Clippy and fail on any warnings
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 test: ## Run all unit and integration tests
