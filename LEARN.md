@@ -24,26 +24,46 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
 
 ## Progress
 
-- [x] 0. Prerequisites
-- [x] 1. Local cluster and dependencies
-- [x] 2. Connect to the cluster
-- [x] 3. Read typed resources
-- [x] 4. Write resources with server-side apply
-- [ ] 5. Dynamic API and discovery (optional)
-- [ ] 6. Watchers
-- [ ] 7. Reflectors and stores
-- [ ] 8. Define a custom resource
-- [ ] 9. First controller
-- [ ] 10. Manage child resources
-- [ ] 11. Status and conditions
-- [ ] 12. Errors, retries, and Events
-- [ ] 13. Finalizers
-- [ ] 14. Watching related resources
-- [ ] 15. Testing the reconciler
-- [ ] 16. Observability
-- [ ] 17. Package and deploy
-- [ ] 18. Tune and scale
-- [ ] 19. CI and supply chain
+- [x] 
+    0. Prerequisites
+- [x] 
+    1. Local cluster and dependencies
+- [x] 
+    2. Connect to the cluster
+- [x] 
+    3. Read typed resources
+- [x] 
+    4. Write resources with server-side apply
+- [x] 
+    5. Dynamic API and discovery (optional)
+- [ ] 
+    6. Watchers
+- [ ] 
+    7. Reflectors and stores
+- [ ] 
+    8. Define a custom resource
+- [ ] 
+    9. First controller
+- [ ] 
+    10. Manage child resources
+- [ ] 
+    11. Status and conditions
+- [ ] 
+    12. Errors, retries, and Events
+- [ ] 
+    13. Finalizers
+- [ ] 
+    14. Watching related resources
+- [ ] 
+    15. Testing the reconciler
+- [ ] 
+    16. Observability
+- [ ] 
+    17. Package and deploy
+- [ ] 
+    18. Tune and scale
+- [ ] 
+    19. CI and supply chain
 - [ ] Stretch goals
 
 ## Repo layout for the exercises
@@ -124,8 +144,9 @@ are collected here so you can check your code against them as you go.
 ### 0. Prerequisites
 
 **Learn**
-- Rust basics you will lean on constantly: ownership and `Arc`, traits and generics
-  (`Api<K>` is generic over the resource type), `Option`/`Result` and `?`, and `serde`.
+
+- Rust basics you will lean on constantly: ownership and `Arc`, traits and generics (`Api<K>` is generic over the
+  resource type), `Option`/`Result` and `?`, and `serde`.
 - Async Rust: `tokio`, `async`/`await`, and especially `futures::Stream` + `StreamExt`.
   The kube runtime is built on streams.
 - Kubernetes objects: `apiVersion`/`kind`/`metadata`/`spec`/`status`, namespaces,
@@ -134,6 +155,7 @@ are collected here so you can check your code against them as you go.
   and closes the gap.
 
 **Read**
+
 - [The Rust Book](https://doc.rust-lang.org/book/), in particular the chapters on error
   handling, traits, smart pointers, and async.
 - [Tokio tutorial](https://tokio.rs/tokio/tutorial)
@@ -144,8 +166,8 @@ are collected here so you can check your code against them as you go.
   come back to each chapter as the matching step comes up.
 
 **Done when** you can explain the difference between `spec` and `status`, and why
-controllers are *level-triggered* (they act on current state) rather than
-*edge-triggered* (they don't act on individual change events).
+controllers are *level-triggered* (they act on current state) rather than *edge-triggered* (they don't act on individual
+change events).
 
 ### 1. Local cluster and dependencies
 
@@ -155,6 +177,7 @@ controllers are *level-triggered* (they act on current state) rather than
 > before running anything that writes.
 
 **Build**
+
 1. Install [kind](https://kind.sigs.k8s.io/) (it runs Kubernetes inside Docker) and
    create a cluster:
    ```sh
@@ -173,6 +196,7 @@ controllers are *level-triggered* (they act on current state) rather than
    Later steps add a few more (a web server, metrics, test helpers) when they are needed.
 
 **Notes**
+
 - `kube` and `k8s-openapi` are released as a pair. Always upgrade them together, and read
   [kube.rs: upgrading](https://kube.rs/upgrading/) before you do.
 - `k8s-openapi` needs exactly one Kubernetes-version feature, set by the final binary.
@@ -197,12 +221,14 @@ controllers are *level-triggered* (they act on current state) rather than
 ### 2. Connect to the cluster: `examples/02_connect.rs`
 
 **Learn**
+
 - `Client::try_default()`: tries your kubeconfig, then falls back to in-cluster config.
 - `kube::Config::infer()` and `kube::config::Kubeconfig` for more control.
 - `#[tokio::main]` and returning `anyhow::Result<()>` from `main`.
 - Setting up `tracing_subscriber` with `RUST_LOG` (try `RUST_LOG=info,kube=debug`).
 
 **Build**
+
 - Print the API server's version (`client.apiserver_version()`).
 - Write a guard that reads the kubeconfig (`Kubeconfig::read()`) and refuses to run unless
   the current context starts with `kind-`. Put it in `src/lib.rs` so every later example
@@ -215,6 +241,7 @@ run after you temporarily switch contexts.
 ### 3. Read typed resources: `examples/03_list_pods.rs`
 
 **Learn**
+
 - `Api<K>` constructors: `Api::namespaced`, `Api::all`, `Api::default_namespaced`.
 - `list` with `ListParams` (label and field selectors, `limit` for paging), `get`, and
   `get_opt` for "it may not exist".
@@ -231,6 +258,7 @@ code contains no `unwrap()`.
 ### 4. Write resources with server-side apply: `examples/04_configmap_apply.rs`
 
 **Learn**
+
 - `create` with `PostParams`, `delete` with `DeleteParams`, `replace`.
 - `replace` is read-modify-write: it fails with a 409 Conflict when the object's
   `resourceVersion` has moved on. That is optimistic concurrency, and it is why
@@ -246,6 +274,7 @@ code contains no `unwrap()`.
 - [Server-Side Apply docs](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
 
 **Build**
+
 1. Apply a ConfigMap with SSA. Run the example twice; the second run should change
    nothing.
 2. Change a value and run it again. Inspect the result with
@@ -279,9 +308,10 @@ argument, resolve it with discovery, and list the objects.
 ### 6. Watchers: `examples/06_watch_pods.rs`
 
 **Learn**
+
 - `kube::runtime::watcher(api, watcher::Config::default())` and the `watcher::Event`
-  variants: `Apply` and `Delete` for changes, and `Init` / `InitApply` / `InitDone` for the
-  (re)list that happens at startup and after a desync.
+  variants: `Apply` and `Delete` for changes, and `Init` / `InitApply` / `InitDone` for the (re)list that happens at
+  startup and after a desync.
 - `watcher::Config` narrows what you watch: `.labels(...)`, `.fields(...)`.
 - `WatchStreamExt`: `.default_backoff()`, `.applied_objects()`, `.touched_objects()`.
   Always add a backoff. Without one, a failing watch retries in a tight loop.
@@ -301,6 +331,7 @@ say which events you would have missed if the restart had taken longer.
 ### 7. Reflectors and stores: `examples/07_reflector.rs`
 
 **Learn**
+
 - `reflector::store()` returns a reader and writer pair. `reflector(writer, stream)`
   keeps the store updated.
 - `Store::state()`, `Store::get()`, `wait_until_ready()`. The store hands out
@@ -327,6 +358,7 @@ list calls after startup.
 ### 8. Define a custom resource: `src/lib.rs` + `examples/crdgen.rs`
 
 **Learn**
+
 - `#[derive(CustomResource)]` generates the `Webpage` type from `WebpageSpec`.
 - `#[kube(...)]` attributes: `group`, `version`, `kind`, `namespaced`, `status`,
   `shortname`, `category`, `printcolumn(...)`, `doc`.
@@ -338,18 +370,18 @@ list calls after startup.
   `#[serde(default = "path")]`. A serde default also lands in the schema, so the API
   server fills it in for clients that omit the field.
 - **Validation, cheapest first:**
-  1. Schema keywords through schemars attributes, for example
-     `#[schemars(range(min = 0, max = 10))]` and `#[schemars(length(max = ...))]`.
-  2. [CEL rules](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules)
-     for anything a keyword can't say (cross-field rules, immutability with `oldSelf`).
-     Derive `KubeSchema` instead of `JsonSchema`, then use
-     `#[x_kube(validation = ...)]` on fields and `#[kube(validation = ...)]` on the whole
-     resource. The API server enforces these with no webhook to run.
-  3. Checks at reconcile time, reported as a condition (step 12).
+    1. Schema keywords through schemars attributes, for example
+       `#[schemars(range(min = 0, max = 10))]` and `#[schemars(length(max = ...))]`.
+    2. [CEL rules](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules)
+       for anything a keyword can't say (cross-field rules, immutability with `oldSelf`).
+       Derive `KubeSchema` instead of `JsonSchema`, then use
+       `#[x_kube(validation = ...)]` on fields and `#[kube(validation = ...)]` on the whole
+       resource. The API server enforces these with no webhook to run.
+    3. Checks at reconcile time, reported as a condition (step 12).
 - API design: read the `spec`/`status` sections of the
   [Kubernetes API conventions](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md).
-  Start at `v1alpha1`. Once others depend on a version, only make compatible changes
-  (add optional fields; never rename, remove, or tighten).
+  Start at `v1alpha1`. Once others depend on a version, only make compatible changes (add optional fields; never rename,
+  remove, or tighten).
 - [kube.rs: schemas](https://kube.rs/controllers/schemas/) and
   [admission](https://kube.rs/controllers/admission/)
 
@@ -396,6 +428,7 @@ pub struct WebpageStatus {
    up in review.
 
 **Done when**
+
 - `kubectl explain webpage.spec` shows your fields with their descriptions.
 - A `Webpage` without `replicas` comes back with `replicas: 1`.
 - The API server rejects `replicas: 50`, and rejects HTML that breaks your CEL rule with
@@ -409,6 +442,7 @@ pub struct WebpageStatus {
 ### 9. First controller: `src/main.rs`
 
 **Learn**
+
 - `Controller::new(Api<Webpage>, watcher::Config::default())`
 - `.run(reconcile, error_policy, Arc<Context>)`, `.shutdown_on_signal()`, and consuming
   the stream with `.for_each(...)`. The controller does nothing unless that stream is
@@ -426,6 +460,7 @@ pub struct WebpageStatus {
   idempotency twice) and [the application](https://kube.rs/controllers/application/).
 
 **Build**
+
 - A controller whose reconcile function only logs the `Webpage` it received and returns
   `Action::requeue` after 5 minutes. Put a `kube::Client` in `Context`.
 - At startup, check that the CRD is installed (a `list` with `limit(1)` is enough) and
@@ -438,6 +473,7 @@ it. The object is gone, which is why step 13 exists.
 ### 10. Manage child resources
 
 **Learn**
+
 - Write desired state as pure functions, for example
   `fn desired_deployment(wp: &Webpage) -> Deployment`. No client, no `async`, so they are
   trivial to test.
@@ -459,6 +495,7 @@ it. The object is gone, which is why step 13 exists.
   [garbage collection](https://kube.rs/controllers/gc/)
 
 **Build** For each `Webpage`, apply:
+
 - a ConfigMap whose `index.html` key holds `spec.html`
 - a Deployment running `nginx` with that ConfigMap mounted at `/usr/share/nginx/html`,
   and `spec.replicas` replicas
@@ -468,6 +505,7 @@ Write unit tests for the three builder functions as you go: the owner reference 
 replicas follow the spec, and the Service selector matches the pod template labels.
 
 **Done when**
+
 - `kubectl port-forward svc/<name> 8080:80` serves your HTML.
 - Deleting the Deployment by hand causes it to come back.
 - Scaling the Deployment by hand gets reverted.
@@ -480,6 +518,7 @@ replicas follow the spec, and the Service selector matches the pod template labe
 ### 11. Status and conditions
 
 **Learn**
+
 - The status subresource and `Api::patch_status`. Status is *observed* state: compute it
   from the children, never copy it from the spec.
 - Use SSA for status too. A status apply needs `apiVersion` and `kind` in the body next to
@@ -501,8 +540,8 @@ replicas follow the spec, and the Service selector matches the pod template labe
   and the loop stops after one extra pass. Putting "now" in status on every reconcile
   spins forever.
 - The second defence is filtering: `predicate_filter(predicates::generation, ...)` drops
-  status-only events. You don't need it here. It requires the `unstable-runtime` feature
-  (`Controller::for_stream`), and a generation-only filter can hide the events that
+  status-only events. You don't need it here. It requires the `unstable-runtime` feature (`Controller::for_stream`), and
+  a generation-only filter can hide the events that
   finalizers and deleted children depend on. Read the `predicates` module docs before
   ever using it.
 - [kube.rs: optimization, "repeatedly triggering yourself"](https://kube.rs/controllers/optimization/#repeatedly-triggering-yourself)
@@ -517,16 +556,17 @@ the cluster is idle (no hot loop).
 ### 12. Errors, retries, and Events
 
 **Learn**
+
 - A `thiserror` error enum for the controller. Wrap `kube::Error` with `#[from]` or
   `#[source]`, and give each failure its own variant so logs and metrics can tell them
   apart.
 - Sort failures into two kinds:
-  - **Transient** (API timeouts, conflicts, a child not ready yet): return `Err`.
-    `error_policy(obj, &err, ctx) -> Action` then decides when to try again.
-  - **Permanent until the user acts** (a spec the operator can't satisfy): don't return
-    `Err`. Set `Ready=False` with a reason, emit a Warning Event, and return
-    `Action::await_change()`. Retrying can't fix it; a spec change will trigger a new
-    reconcile anyway.
+    - **Transient** (API timeouts, conflicts, a child not ready yet): return `Err`.
+      `error_policy(obj, &err, ctx) -> Action` then decides when to try again.
+    - **Permanent until the user acts** (a spec the operator can't satisfy): don't return
+      `Err`. Set `Ready=False` with a reason, emit a Warning Event, and return
+      `Action::await_change()`. Retrying can't fix it; a spec change will trigger a new
+      reconcile anyway.
 - kube has no built-in per-object exponential backoff. A fixed requeue delay in
   `error_policy` is the common choice. Below that, the client already retries throttled
   and unavailable responses (429, 503, 504) with its own backoff.
@@ -549,6 +589,7 @@ retrying.
 ### 13. Finalizers
 
 **Learn**
+
 - When you need a finalizer: to clean up anything owner references can't, such as
   external systems, cluster-scoped objects, or objects in another namespace.
 - `kube::runtime::finalizer::finalizer(&api, NAME, obj, |event| async { ... })`, matching
@@ -578,6 +619,7 @@ finalizer by hand in an emergency.
 ### 14. Watching related resources
 
 **Learn**
+
 - `.watches(api, config, mapper)` maps changes in *non-owned* objects to the objects
   that should be reconciled.
 - `ObjectRef`, and using the controller's own cache (`Controller::store()`) inside the
@@ -590,6 +632,7 @@ HTML from a ConfigMap the user manages. `html` becomes optional. Add a CEL rule 
 spec so that exactly one of the two is set: `has(self.html) != has(self.htmlFrom)`.
 
 **Done when**
+
 - Editing the user's ConfigMap updates the served page without touching the `Webpage`.
 - A `Webpage` that names a missing ConfigMap shows `Ready=False` with a clear reason, and
   becomes `Ready` on its own when the ConfigMap is created.
@@ -605,12 +648,13 @@ You already have unit tests for the builders (step 10) and the CRD drift test (s
 This step covers the code that talks to Kubernetes.
 
 **Learn**
+
 - The four layers in [kube.rs: testing](https://kube.rs/controllers/testing/): plain
   unit tests, unit tests with a mocked API server, integration tests against a real
   cluster, and end-to-end tests with the operator running in the cluster. Cost and
   flakiness rise as you go up, so keep most tests at the bottom.
-- Mocking the API server with `tower-test`: build a `Client` from a mock service
-  (`Client::new`) and assert on the requests the reconciler sends. See `fixtures.rs` in
+- Mocking the API server with `tower-test`: build a `Client` from a mock service (`Client::new`) and assert on the
+  requests the reconciler sends. See `fixtures.rs` in
   [kube-rs/controller-rs](https://github.com/kube-rs/controller-rs).
 - The [`envtest`](https://crates.io/crates/envtest) crate runs a real API server and etcd
   with no nodes. It is a middle ground when mocks get unwieldy.
@@ -621,6 +665,7 @@ This step covers the code that talks to Kubernetes.
   `wait::conditions` for waiting on state in tests.
 
 **Build**
+
 - One mocked test for a reconcile path, for example "a new `Webpage` gets the finalizer
   added".
 - One integration test that creates a `Webpage`, waits for it to become `Ready`, deletes
@@ -632,6 +677,7 @@ This step covers the code that talks to Kubernetes.
 ### 16. Observability
 
 **Learn**
+
 - Logs: JSON output in the cluster (`tracing-subscriber`'s `json` feature) and
   human-readable locally, chosen by an environment variable or flag.
 - Metrics with `prometheus-client`. Three cover most needs: a reconcile counter, a
@@ -652,18 +698,19 @@ moving while you create, break, and delete `Webpage`s.
 ### 17. Package and deploy
 
 **Learn**
+
 - A multi-stage Dockerfile. Cache dependency builds (`cargo-chef` or BuildKit cache
   mounts), and use a minimal runtime image that runs as non-root, such as distroless or
   Chainguard `static` with a musl build. Avoid `scratch`, which defaults to root.
 - `kind load docker-image` to get local images into the cluster.
 - RBAC with least privilege: a ServiceAccount plus a ClusterRole granting only what the
   controller uses.
-  - `webpages`: get, list, watch, patch (patch is for the finalizer)
-  - `webpages/status`: patch
-  - `webpages/finalizers`: update (only checked on clusters that enforce owner-reference
-    permissions, such as OpenShift, but harmless elsewhere)
-  - `configmaps`, `services`, `deployments`: get, list, watch, create, patch
-  - `events` in the `events.k8s.io` group: create, patch
+    - `webpages`: get, list, watch, patch (patch is for the finalizer)
+    - `webpages/status`: patch
+    - `webpages/finalizers`: update (only checked on clusters that enforce owner-reference
+      permissions, such as OpenShift, but harmless elsewhere)
+    - `configmaps`, `services`, `deployments`: get, list, watch, create, patch
+    - `events` in the `events.k8s.io` group: create, patch
 
   SSA needs `create` as well as `patch`. Nothing needs `delete`, because garbage
   collection removes the children. The CRD is installed separately, so the operator needs
@@ -689,6 +736,7 @@ produces a clear error in the operator's logs.
 ### 18. Tune and scale
 
 **Learn**
+
 - Reconcile concurrency is **unbounded** by default. Cap it with
   `controller::Config::default().concurrency(n)` via `.with_config(...)`. `debounce`
   on the same config merges bursts of events at the cost of a slower response.
@@ -717,6 +765,7 @@ ends up `Ready`.
 ### 19. CI and supply chain
 
 **Learn**
+
 - What CI already enforces here: `cargo fmt --check`, `cargo clippy -D warnings`, and
   `cargo test`.
 - Dependency checks: [`cargo deny`](https://embarkstudios.github.io/cargo-deny/) for
@@ -750,8 +799,7 @@ checks, and all of them pass.
   leader mid-reconcile.
 - **Workspace split:** move the CRD types into their own crate (for example
   `crates/webpage-crd`) so other tools can use them without pulling in the operator.
-- **Multiple controllers:** run two controllers in one process that share reflectors
-  (`unstable-runtime`).
+- **Multiple controllers:** run two controllers in one process that share reflectors (`unstable-runtime`).
 - **Packaging:** turn `manifests/` into a Helm chart or a kustomize base.
 - **Compare your code:** read [controller-rs](https://github.com/kube-rs/controller-rs)
   from start to finish and compare it with your operator.
