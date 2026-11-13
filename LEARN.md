@@ -28,7 +28,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
 - [x] 1. Local cluster and dependencies
 - [x] 2. Connect to the cluster
 - [x] 3. Read typed resources
-- [ ] 4. Write resources with server-side apply
+- [x] 4. Write resources with server-side apply
 - [ ] 5. Dynamic API and discovery (optional)
 - [ ] 6. Watchers
 - [ ] 7. Reflectors and stores
