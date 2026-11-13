@@ -36,7 +36,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     4. Write resources with server-side apply
 - [x] 
     5. Dynamic API and discovery (optional)
-- [ ] 
+- [x] 
     6. Watchers
 - [ ] 
     7. Reflectors and stores
