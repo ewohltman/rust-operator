@@ -1289,8 +1289,6 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
- "schemars",
- "serde",
  "serde_json",
  "thiserror",
  "tokio",
