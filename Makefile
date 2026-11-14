@@ -1,6 +1,6 @@
 CARGO := cargo
 
-.PHONY: help build release check fmt clippy test doc clean
+.PHONY: help build release check crd fmt clippy test doc clean
 
 default: help
 
@@ -15,6 +15,9 @@ release: ## Build an optimized release binary
 
 check: ## Fast compile check without generating binaries
 	$(CARGO) fmt --all -- --check
+
+crd: ## Generate CRD
+	mkdir -p manifests && $(CARGO) run --example crdgen > manifests/crd-new.json && mv manifests/crd-new.json manifests/crd.json
 
 fmt: ## Format code with rustfmt
 	$(CARGO) fmt --all

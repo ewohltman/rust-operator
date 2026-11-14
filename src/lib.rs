@@ -1,4 +1,7 @@
+use kube::CustomResource;
+use kube::KubeSchema;
 use kube::config;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 /// Errors returned by this module.
@@ -74,4 +77,54 @@ fn new_default_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync + 
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .finish()
+}
+
+/// A static web page served by nginx.
+#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Eq, PartialEq)]
+#[kube(
+    group = "demo.ephemeral-roles.net",
+    version = "v1alpha1",
+    kind = "Webpage",
+    namespaced
+)]
+#[kube(status = "WebpageStatus", shortname = "wp", doc = "An HTML webpage.")]
+#[serde(rename_all = "camelCase")]
+pub struct WebpageSpec {
+    /// The HTML document to serve as `index.html`.
+    #[schemars(length(max = 102_400))]
+    #[x_kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document"))]
+    pub html: String,
+    /// How many nginx pods to run at the same time.
+    #[serde(default = "default_replicas")]
+    #[schemars(range(min = 0, max = 10))]
+    pub replicas: i32,
+}
+
+/// Observed state of a `Webpage`, written only by the operator.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, KubeSchema, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebpageStatus {
+    /// Ready pods, as reported by the Deployment.
+    pub ready_replicas: i32,
+    /// The `metadata.generation` this status was computed from.
+    pub observed_generation: Option<i64>,
+}
+
+fn default_replicas() -> i32 {
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kube::core::CustomResourceExt;
+
+    #[test]
+    fn test_crd_spec_change() {
+        let new = serde_json::to_value(Webpage::crd()).unwrap();
+        let current: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open("manifests/crd.json").unwrap()).unwrap();
+
+        pretty_assertions::assert_eq!(new, current, "crd changed. run `make crd` to regenerate.");
+    }
 }
