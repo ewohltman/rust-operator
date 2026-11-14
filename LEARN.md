@@ -38,7 +38,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     5. Dynamic API and discovery (optional)
 - [x] 
     6. Watchers
-- [ ] 
+- [x] 
     7. Reflectors and stores
 - [ ] 
     8. Define a custom resource
