@@ -40,7 +40,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     6. Watchers
 - [x] 
     7. Reflectors and stores
-- [ ] 
+- [x] 
     8. Define a custom resource
 - [ ] 
     9. First controller
