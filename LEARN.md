@@ -42,7 +42,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     7. Reflectors and stores
 - [x] 
     8. Define a custom resource
-- [ ] 
+- [x] 
     9. First controller
 - [ ] 
     10. Manage child resources
