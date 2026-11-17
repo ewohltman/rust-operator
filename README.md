@@ -21,9 +21,32 @@ spec:
 
 ## Status
 
-Early. `src/main.rs` is still a placeholder and nothing above works yet. The work follows
-[`LEARN.md`](LEARN.md), a 20-step roadmap with an exercise and a "done when" check for every
-step. Its progress checklist is the place to see how far things have got.
+Steps 0–9 of [`LEARN.md`](LEARN.md) are done (see its progress checklist). What exists today:
+
+- **`Webpage` CRD** (`demo.example.com/v1alpha1`), defined in `src/lib.rs` with a schema
+  default for `replicas` and a CEL rule requiring `html` to be a full document. The generated
+  manifest is committed as `manifests/crd.json`, and a unit test fails if it drifts.
+- **Shared library code**: a `thiserror` error type, a `tracing` setup, and the kind-context
+  guard that refuses to talk to any cluster whose context doesn't start with `kind-`.
+- **Exercises** for steps 2–7 in `examples/`: connecting, listing pods, server-side apply of
+  a ConfigMap, the dynamic API, watchers, and reflectors. `crdgen` prints the CRD and
+  `wpgen` prints a sample `Webpage`.
+- **A first controller** in `src/main.rs`. It watches `Webpage` resources, attaches a
+  finalizer, and logs each reconcile. It runs in-cluster or, outside a cluster, against a
+  kind context only.
+
+Not done yet: the operator doesn't create the ConfigMap, Deployment, or Service, and doesn't
+write status (steps 10–14). Nothing from the production-readiness phase (steps 15–19) exists
+yet: no integration tests, metrics, RBAC, or operator Deployment manifests.
+
+To try the controller on kind:
+
+```sh
+make crd                                  # regenerate manifests/crd.json
+kubectl apply -f manifests/crd.json
+cargo run                                 # the operator
+cargo run --example wpgen | kubectl apply -f -
+```
 
 ## Roadmap
 
@@ -57,7 +80,7 @@ kubectl config current-context        # must print kind-learn
 cargo build
 ```
 
-Then start at step 0 of [`LEARN.md`](LEARN.md). Each exercise is an example you run with
+`make help` lists shortcuts for the common commands. Then start at step 0 of [`LEARN.md`](LEARN.md). Each exercise is an example you run with
 `cargo run --example <name>`, for instance `cargo run --example 03_list_pods`.
 
 > **Use a throwaway cluster.** kube-rs and `kubectl` both act on your kubeconfig's *current
@@ -66,7 +89,7 @@ Then start at step 0 of [`LEARN.md`](LEARN.md). Each exercise is an example you 
 
 ## Layout
 
-This is the planned layout. The directories appear as the steps that need them are done.
+This is the planned layout. `tests/` and the RBAC and Deployment manifests don't exist yet.
 
 ```text
 src/
