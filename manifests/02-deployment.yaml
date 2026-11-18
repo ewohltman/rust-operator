@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-operator
+  namespace: rust-operator
+  labels:
+    app.kubernetes.io/name: rust-operator
+spec:
+  # One replica, and Recreate so old and new never reconcile side by side (no leader election yet).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rust-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rust-operator
+    spec:
+      serviceAccountName: rust-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          # Local image: `docker build -t rust-operator:dev . && kind load docker-image rust-operator:dev`
+          image: ewohltman/rust-operator:latest
+          imagePullPolicy: Always
+          env:
+            - name: RUST_LOG
+              value: info
+          # Probes go here once /healthz exists (step 16).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ "ALL" ]
+      terminationGracePeriodSeconds: 30

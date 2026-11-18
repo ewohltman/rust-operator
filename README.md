@@ -4,8 +4,9 @@ A Kubernetes operator written in Rust with [kube-rs](https://kube.rs), built one
 time as a way of learning both.
 
 The target is a **`Webpage` operator**. You create a `Webpage` resource containing some HTML,
-and the operator serves it with nginx: it creates a ConfigMap, a Deployment, and a Service,
-keeps them in sync with the resource, and reports status back on it.
+and the operator serves it with nginx at `https://<name>.ephemeral-roles.net/`. It creates a
+namespace holding a ConfigMap, a Deployment, a Service, and a Gateway API HTTPRoute, keeps them in
+sync with the resource, and reports status back on it.
 
 ```yaml
 apiVersion: demo.ephemeral-roles.net/v1alpha1
@@ -21,35 +22,80 @@ spec:
 
 ## Status
 
-Steps 0–10 of [`LEARN.md`](LEARN.md) are done (see its progress checklist). What exists today:
+Steps 0–10 of [`LEARN.md`](LEARN.md) are done (see its progress checklist), plus a side step that
+packages and deploys an MVP ahead of the roadmap. What exists today:
 
-- **`Webpage` CRD** (`demo.ephemeral-roles.net/v1alpha1`), defined in `src/lib.rs` with a schema
-  default for `replicas` and a CEL rule requiring `html` to be a full document. The generated
+- **`Webpage` CRD** (`demo.ephemeral-roles.net/v1alpha1`, short name `wp`), defined in
+  `src/lib.rs` with a schema default for `replicas` (1, range 0–10), a 102,400-character limit
+  on `html`, and a CEL rule requiring `html` to start with `<!doctype html>`. The generated
   manifest is committed as `manifests/crd.json`, and a unit test fails if it drifts.
 - **Shared library code**: `thiserror` error types, a `tracing` setup, the kind-context guard
   that refuses to talk to any cluster whose context doesn't start with `kind-`, and pure
-  `desired_*` builders for the child resources, each with a unit test.
+  `desired_*` builders for the namespace, the four children, and the status, each with a unit
+  test.
 - **Exercises** for steps 2–7 in `examples/`: connecting, listing pods, server-side apply of
   a ConfigMap, the dynamic API, watchers, and reflectors. `crdgen` prints the CRD and
   `wpgen` prints a sample `Webpage`.
-- **The controller** in `src/main.rs`. For each `Webpage` it server-side applies a ConfigMap
-  holding the HTML, an nginx Deployment, and a Service, all owned by the `Webpage` so they
-  are garbage-collected with it. It watches those children (filtered by a managed-by label)
-  and writes `status.readyReplicas` and `status.observedGeneration`. It runs in-cluster or,
-  outside a cluster, against a kind context only.
+- **The controller** in `src/main.rs`. For each `Webpage` named `<name>` it server-side applies,
+  as field manager `rust-operator`:
+  - a namespace `wp-<name>`, owned by the `Webpage` and labeled
+    `ephemeral-roles.net/public-gateway=true` (so its routes can attach to the shared Gateway)
+    and `linkerd.io/inject=enabled`;
+  - then, concurrently and owned by that namespace, a ConfigMap holding the HTML, an nginx
+    Deployment that mounts it, a Service on port 80, and an HTTPRoute for
+    `<name>.ephemeral-roles.net` attached to the `public` Gateway in `envoy-gateway-system`
+    (listener `https-wildcard`).
 
-Not done yet: status conditions, Events, finalizers, and related-resource watches (steps 11–14). Nothing from the
-production-readiness phase (steps 15–19) exists yet: no
-integration tests, metrics, RBAC, or operator Deployment manifests.
+  It watches those children (filtered by a managed-by label) and writes
+  `status.readyReplicas` and `status.observedGeneration`. Once the status matches the spec it
+  resyncs every 5 minutes; errors retry after 5 seconds. It runs in-cluster or, outside a
+  cluster, against a kind context only.
+- **Packaging**: a `Dockerfile` (release build on `rust:1.99.1`, distroless runtime image) and
+  manifests for the operator's namespace, a least-privilege ClusterRole (no `delete`
+  anywhere), and a single-replica `Recreate` Deployment that runs as non-root with a
+  read-only root filesystem.
+- **A demo page**: `static/demo.html` is an interactive diagram of how the operator serves a
+  page, and `static/demo.yml` wraps it in a `Webpage` named `demo`.
+
+Known gaps in the MVP:
+
+- The namespace is cluster-scoped but its owner, the `Webpage`, is namespaced. Kubernetes
+  treats that owner reference as unresolvable, so deleting a `Webpage` leaves `wp-<name>` and
+  everything in it behind. Finalizers (step 13) will fix this.
+- The children are owned by the namespace rather than the `Webpage`, so `.owns()` never maps
+  their changes back to the `Webpage`. If the pods aren't ready yet when it reconciles, the
+  operator waits for the next change to the `Webpage` itself rather than requeueing, so
+  `readyReplicas` can stay out of date.
+- The child namespace is derived from the name alone, so two `Webpage`s with the same name in
+  different namespaces collide.
+
+Not done yet: status conditions, Events, finalizers, and related-resource watches (steps
+11–14), and the rest of production readiness (steps 15–19): integration tests, metrics,
+health probes, leader election, and CI for the image.
 
 To try the controller on kind:
 
 ```sh
+# The HTTPRoute child needs the Gateway API CRDs:
+# https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api
 make crd                                  # regenerate manifests/crd.json
 kubectl apply -f manifests/crd.json
 cargo run                                 # the operator
 cargo run --example wpgen | kubectl apply -f -
-kubectl get webpage,configmap,deployment,service   # the Webpage and its children
+kubectl get webpage example               # the Webpage and its status
+kubectl get configmap,deployment,service,httproute -n wp-example   # its children
+```
+
+Nothing routes `*.ephemeral-roles.net` to a kind cluster, but
+`kubectl port-forward -n wp-example svc/example 8080:80` shows the page.
+
+To deploy the operator in-cluster:
+
+```sh
+make build                                # docker image ewohltman/rust-operator:latest
+docker push ewohltman/rust-operator:latest
+kubectl apply -f manifests/               # CRD, namespace, RBAC, Deployment
+kubectl apply -f static/demo.yml          # serves the demo page at demo.ephemeral-roles.net
 ```
 
 ## Roadmap
@@ -94,7 +140,7 @@ cargo build
 
 ## Layout
 
-This is the planned layout. `tests/` and the RBAC and Deployment manifests don't exist yet.
+This is the planned layout. `tests/` doesn't exist yet.
 
 ```text
 src/
@@ -103,11 +149,18 @@ src/
 examples/
   NN_<name>.rs        # one exercise per LEARN.md step, prefixed with the step number
   crdgen.rs           # prints the CRD manifest
+  wpgen.rs            # prints a sample Webpage
 tests/
   integration.rs      # cluster-dependent tests, marked #[ignore]
 manifests/
   crd.json            # generated by crdgen and committed
-  ...                 # RBAC and the operator Deployment
+  00-namespace.yaml   # the operator's namespace
+  01-rbac.yaml        # ServiceAccount, ClusterRole, ClusterRoleBinding
+  02-deployment.yaml  # the operator Deployment
+static/
+  demo.html           # interactive diagram of the operator's flow
+  demo.yml            # demo.html wrapped in a Webpage
+Dockerfile            # builds the operator image
 ```
 
 ## Development

@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webpage Operator Flow</title>
+<meta name="description" content="How rust-operator turns resume.yml into https://resume.ephemeral-roles.net/">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}</script>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #fff; --surface-2: #f0efeb; --ink: #1d1d1b; --muted: #66655f; --line: #d9d8d0;
+    --ctl: #c2410c; --ctl-soft: #fdeee4; --net: #1d4ed8; --net-soft: #e6edfd; --ns-fill: #fbfaf7;
+    --code-bg: #f3f2ee; --k: #9a3412; --s: #166534; --n: #1d4ed8;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #141413; --surface: #1f1f1d; --surface-2: #272725; --ink: #ecebe6; --muted: #a3a29b; --line: #3a3934;
+    --ctl: #fb923c; --ctl-soft: #3a2416; --net: #60a5fa; --net-soft: #172540; --ns-fill: #191918;
+    --code-bg: #191917; --k: #fdba74; --s: #86efac; --n: #93c5fd; color-scheme: dark; } }
+  :root[data-theme="dark"] {
+    --bg: #141413; --surface: #1f1f1d; --surface-2: #272725; --ink: #ecebe6; --muted: #a3a29b; --line: #3a3934;
+    --ctl: #fb923c; --ctl-soft: #3a2416; --net: #60a5fa; --net-soft: #172540; --ns-fill: #191918;
+    --code-bg: #191917; --k: #fdba74; --s: #86efac; --n: #93c5fd; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-x: hidden; }
+  a { color: var(--ctl); }
+  code, pre { font-family: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; font-size: .85em; }
+  :not(pre) > code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 .3em; overflow-wrap: anywhere; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 28px 0 14px; }
+  h1 { margin: 0; font-size: clamp(1.4rem, 3.2vw, 2rem); line-height: 1.15; letter-spacing: -.02em; }
+  h1 span { color: var(--ctl); }
+  .sub { margin: 6px 0 0; color: var(--muted); max-width: 78ch; }
+  .theme-btn { flex: none; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 999px;
+               padding: 6px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+  button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid var(--ctl); outline-offset: 2px; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .diagram-card { padding: 12px 12px 0; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 4px 8px; }
+  .btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font: inherit; font-size: .88rem; cursor: pointer; }
+  .btn.ctl { border-color: var(--ctl); color: var(--ctl); }
+  .btn.net { border-color: var(--net); color: var(--net); }
+  .btn[aria-pressed="true"].ctl { background: var(--ctl-soft); }
+  .btn[aria-pressed="true"].net { background: var(--net-soft); }
+  .legend { margin-left: auto; display: flex; gap: 14px; font-size: .8rem; color: var(--muted); }
+  .legend i { display: inline-block; width: 18px; border-top: 2px dashed; vertical-align: middle; margin-right: 5px; }
+  .scroll { overflow-x: auto; }
+  svg.flow { display: block; width: 100%; min-width: 720px; height: auto; font-family: inherit; }
+
+  .node rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: fill .2s, stroke .2s; }
+  .node { cursor: pointer; outline: none; transition: opacity .25s; }
+  .node .t { font-size: 14px; font-weight: 650; fill: var(--ink); }
+  .node .d { font-size: 11.5px; fill: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .node .tag { font-size: 9.5px; font-weight: 700; letter-spacing: .06em; fill: var(--muted); }
+  .node:hover rect { stroke: var(--muted); }
+  .node.sel rect, .node.on rect { stroke: var(--ctl); fill: var(--ctl-soft); stroke-width: 2; }
+  .playing-net .node.on rect, .node.sel.net rect { stroke: var(--net); fill: var(--net-soft); }
+  .nsbox { fill: var(--ns-fill); stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .nslabel { font-size: 12px; font-weight: 700; fill: var(--muted); letter-spacing: .03em; }
+  .note { font-size: 11px; fill: var(--muted); }
+  .edge { fill: none; stroke-width: 2; stroke-dasharray: 6 5; animation: dash 1.1s linear infinite; transition: opacity .25s; }
+  .edge.ctl { stroke: var(--ctl); } .edge.net { stroke: var(--net); } .edge.k8s { stroke: var(--muted); }
+  .elabel { font-size: 11px; font-weight: 600; transition: opacity .25s; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .elabel.ctl { fill: var(--ctl); } .elabel.net { fill: var(--net); } .elabel.k8s { fill: var(--muted); }
+  #m-ctl path { fill: var(--ctl); } #m-net path { fill: var(--net); } #m-k8s path { fill: var(--muted); }
+  @keyframes dash { to { stroke-dashoffset: -22; } }
+  .playing .node:not(.on), .playing .edge:not(.on), .playing .elabel:not(.on) { opacity: .18; }
+  .edge.on { stroke-width: 3; }
+  @media (prefers-reduced-motion: reduce) { .edge { animation: none; } }
+
+  .info { border-top: 1px solid var(--line); margin: 0 -12px; padding: 12px 16px 14px; min-height: 92px; }
+  .info .step { font-size: .75rem; font-weight: 700; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+  .info h2 { margin: 2px 0 4px; font-size: 1.05rem; }
+  .info p { margin: 0; max-width: 100ch; }
+
+  .row { display: grid; grid-template-columns: 1fr 1.15fr; gap: 16px; margin: 16px 0; }
+  .row > * { min-width: 0; }
+  @media (max-width: 820px) { .row { grid-template-columns: 1fr; } }
+  .panel { padding: 14px 16px; }
+  .panel h3 { margin: 0 0 8px; font-size: .95rem; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .panel h3 small { font-weight: 400; color: var(--muted); font-size: .8rem; }
+  pre { margin: 0; padding: 12px 14px; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; overflow: auto; line-height: 1.5; }
+  .yk { color: var(--k); } .ys { color: var(--s); } .yn { color: var(--n); } .yc { color: var(--muted); font-style: italic; }
+  .facts { margin: 12px 0 0; padding-left: 18px; font-size: .88rem; }
+  .facts li { margin-bottom: 3px; }
+
+  .browser { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+  .bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
+  .url { flex: 1; min-width: 0; font-size: .8rem; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .url b { color: #15803d; font-weight: 600; }
+  .bar a { font-size: .8rem; white-space: nowrap; }
+  .viewport { position: relative; height: 360px; overflow: hidden; background: #fff; }
+  .viewport iframe { position: absolute; top: 0; left: 0; width: 1000px; height: 1300px; border: 0; transform-origin: 0 0; }
+
+  footer { color: var(--muted); font-size: .8rem; padding: 0 0 28px; }
+  footer b { color: var(--ink); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>How <code style="font-size:.8em">resume.yml</code> becomes <span>resume.ephemeral-roles.net</span></h1>
+      <p class="sub"><code>rust-operator</code> is a Kubernetes operator written in Rust with kube-rs. You apply one <code>Webpage</code>
+        with a full HTML document in it. The operator then builds what is needed to serve that document publicly.
+        Click any box in the diagram, or play either flow.</p>
+    </div>
+    <button class="theme-btn" id="themeBtn" type="button" aria-label="Toggle light and dark mode">◐</button>
+  </header>
+
+  <div class="card diagram-card">
+    <div class="toolbar">
+      <button class="btn ctl" id="playBuild" type="button" aria-pressed="false">▶ Build it</button>
+      <button class="btn net" id="playVisit" type="button" aria-pressed="false">▶ Serve a visit</button>
+      <span class="legend"><span><i style="color:var(--ctl)"></i>operator writes</span><span><i style="color:var(--net)"></i>HTTP request</span><span><i style="color:var(--muted)"></i>Kubernetes</span></span>
+    </div>
+    <div class="scroll">
+      <svg class="flow" id="flow" viewBox="0 0 1000 380" role="group" aria-label="Flow diagram from Webpage to live site">
+        <defs>
+          <marker id="m-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+          <marker id="m-net" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+          <marker id="m-k8s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker>
+        </defs>
+        <g id="ns-group" class="node" tabindex="0" role="button" data-id="ns" aria-label="Namespace wp-resume">
+          <rect class="nsbox" x="270" y="14" width="450" height="356" rx="14" style="fill:var(--ns-fill)"/>
+          <text class="nslabel" x="288" y="38">NAMESPACE wp-resume</text>
+          <text class="note" x="288" y="54">one per Webpage · label ephemeral-roles.net/public-gateway=true</text>
+        </g>
+        <g id="edges"></g>
+        <g id="nodes"></g>
+        <text class="note" x="510" y="316">All four children: owner = Namespace,</text>
+        <text class="note" x="510" y="332">label managed-by=rust-operator,</text>
+        <text class="note" x="510" y="348">written with server-side apply.</text>
+      </svg>
+    </div>
+    <div class="info" id="info" aria-live="polite"></div>
+  </div>
+
+  <div class="row">
+    <div class="card panel">
+      <h3>The input <small>resume.yml · <span id="size"></span></small></h3>
+      <pre id="yaml"></pre>
+      <ul class="facts">
+        <li><b>Validated by the API server</b> before the operator sees it: <code>html</code> ≤ 102,400 chars and must start with <code>&lt;!doctype html&gt;</code> (a CEL rule); <code>replicas</code> 0–10, default 1.</li>
+        <li><b>Idempotent:</b> every reconcile rebuilds all desired objects with pure <code>desired_*</code> functions and applies them again. The operator writes only <code>status</code> on the Webpage, never <code>spec</code>.</li>
+        <li><b>To update the site</b>, edit <code>spec.html</code> and apply again. The ConfigMap changes, and the kubelet syncs the new file into the running pods without a restart.</li>
+        <li><b>Where the operator runs:</b> a one-replica Deployment in the <code>rust-operator</code> namespace, from a distroless image, as non-root with a read-only root filesystem. Its ClusterRole has no <code>delete</code> verb anywhere; garbage collection removes children through owner references.</li>
+      </ul>
+    </div>
+    <div class="card panel">
+      <h3>The output <small>the exact <code>spec.html</code>, rendered</small></h3>
+      <div class="browser">
+        <div class="bar"><i></i><i></i><i></i>
+          <div class="url"><b>https://</b>resume.ephemeral-roles.net/</div>
+          <a href="https://resume.ephemeral-roles.net/" target="_blank" rel="noopener">Open live ↗</a>
+        </div>
+        <div class="viewport" id="viewport"><iframe id="preview" title="Rendered resume from spec.html" sandbox="allow-popups allow-popups-to-escape-sandbox" tabindex="-1"></iframe></div>
+      </div>
+    </div>
+  </div>
+
+  <footer><b>Known gaps (MVP, ahead of LEARN.md steps 11–19):</b> deleting the Webpage doesn't remove <code>wp-resume</code>, because a cluster-scoped Namespace can't have a namespaced owner.
+    The children are owned by the Namespace, so <code>.owns()</code> never maps their changes back to the Webpage. If the pods aren't ready when it reconciles, the operator waits for the next change to the Webpage, so <code>readyReplicas</code> can stay out of date.
+    No status conditions, Events, finalizers, metrics or leader election yet.
+    Source: <a href="https://github.com/ewohltman/rust-operator">ewohltman/rust-operator</a> (<code>src/lib.rs</code>, <code>src/main.rs</code>).</footer>
+</div>
+
+<script type="text/plain" id="resume-html">
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eric Wohltman — Resume (Unified)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #2b2b2b;
+    --body: #3a3a3a;
+    --muted: #6f6f6f;
+    --rule: #2b2b2b;
+    --dash: #c8c8c8;
+    --icon: #707070;
+    /* Subtle accent: one muted teal-blue, used for rules, icons, markers and project names */
+    --accent: #1f5f7a;
+    --accent-mid: #6f9db1;
+    --accent-soft: #eaf2f5;
+  }
+  @page { size: letter; margin: 0.4in 0.45in; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0 auto;
+    max-width: 8.5in;
+    padding: 0.4in 0.45in;
+    background: #fff;
+    color: var(--body);
+    font: 8.9pt/1.3 "Rubik", "Helvetica Neue", Arial, sans-serif;
+  }
+  @media print { body { padding: 0; max-width: none; } }
+  a { color: inherit; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  svg.i { width: 9pt; height: 9pt; fill: var(--accent-mid); flex: none; vertical-align: -1pt; }
+
+  /* Header */
+  header h1 {
+    margin: 0; font-size: 26pt; line-height: 1.05; font-weight: 600;
+    letter-spacing: 0.01em; text-transform: uppercase; color: var(--ink);
+  }
+  header .title { margin: 2pt 0 5pt; font-size: 11.5pt; font-weight: 500; color: var(--muted); }
+  header .title span { margin: 0 3pt; color: var(--accent-mid); }
+  .contact { display: flex; flex-wrap: wrap; gap: 3pt 12pt; margin: 0; padding: 0; list-style: none;
+             font-size: 8.5pt; font-weight: 500; color: var(--ink); }
+  .contact li { display: flex; align-items: center; gap: 4pt; }
+
+  /* Layout */
+  .cols { display: grid; grid-template-columns: 1.55fr 1fr; gap: 0 18pt; margin-top: 9pt; }
+  section { margin-bottom: 8pt; }
+  section:last-child { margin-bottom: 0; }
+  h2 {
+    margin: 0 0 4pt; padding-bottom: 1pt;
+    font-size: 13pt; font-weight: 600; text-transform: uppercase; letter-spacing: 0.01em;
+    color: var(--accent); border-bottom: 2.25pt solid var(--accent);
+  }
+  p { margin: 0; }
+  ul { margin: 2pt 0 0; padding-left: 11pt; }
+  li { margin-bottom: 1pt; }
+  li::marker { color: var(--accent-mid); }
+
+  /* Entries */
+  .entry { padding-bottom: 4pt; margin-bottom: 4pt; border-bottom: 1px dashed var(--dash); break-inside: avoid; }
+  .entry:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+  .entry h3 { margin: 0; font-size: 11pt; font-weight: 400; color: var(--ink); }
+  .entry .org { margin: 0; font-size: 9.2pt; font-weight: 600; color: var(--muted); }
+  .entry .meta { display: flex; flex-wrap: wrap; gap: 2pt 12pt; margin: 1pt 0 0; font-size: 8.5pt; color: var(--body); }
+  .entry .meta span { display: inline-flex; align-items: center; gap: 4pt; }
+  .entry .roles { margin: 1pt 0 0; font-size: 8.5pt; color: var(--muted); }
+
+  /* Key achievements */
+  .ach { display: grid; grid-template-columns: 16pt 1fr; gap: 0 6pt; padding-bottom: 6pt; margin-bottom: 6pt;
+         border-bottom: 1px dashed var(--dash); break-inside: avoid; }
+  .ach:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+  .ach svg { width: 13pt; height: 13pt; fill: var(--accent); margin-top: 1pt; }
+  .ach h4 { margin: 0 0 1pt; font-size: 9.5pt; font-weight: 600; color: var(--ink); }
+
+  /* Skills chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 3pt 5pt; }
+  .chips span { padding: 0 3pt 1pt; font-size: 8.4pt; font-weight: 600; color: var(--ink);
+                background: var(--accent-soft); border-bottom: 1px solid var(--accent-mid); }
+  .chips span span { padding: 0; background: none; border: 0; }
+
+  /* Open source */
+  .proj { padding-bottom: 4pt; margin-bottom: 4pt; border-bottom: 1px dashed var(--dash); break-inside: avoid; }
+  .proj:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+  .proj h4 { margin: 0; font-size: 9.5pt; font-weight: 600; color: var(--accent); }
+  .proj .stack { font-size: 8.4pt; font-weight: 500; color: var(--muted); }
+  .proj ul { margin-top: 1pt; }
+  .proj a.inline { text-decoration: underline; text-decoration-color: #b5b5b5; }
+
+  /* Keep hyphenated terms on one line so PDF text extraction doesn't drop the hyphen ("kube-rs" -> "kubers") */
+  .nw { white-space: nowrap; }
+  code { font-family: inherit; font-weight: 500; color: var(--ink); }
+  .ach .where { font-weight: 500; color: var(--muted); }
+
+  /* TODO placeholders: fill in or delete before exporting. Highlighted on purpose so they can't slip through. */
+  .todo { background: #fff0a0; outline: 1px dashed #c9a400; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 5 18.66l-1-1.73A8 8 0 1 1 20 12v1.5a1.5 1.5 0 0 1-3 0V12a5 5 0 1 0-1.46 3.53A3.5 3.5 0 0 0 22 13.5V12A10 10 0 0 0 12 2zm0 13a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.6 13.4a1 1 0 0 1 0-1.4l3.5-3.5a1 1 0 1 1 1.4 1.4L12 13.4a1 1 0 0 1-1.4 0zm-2.8 5.7a4 4 0 0 1-2.9-6.8l2.1-2.1a1 1 0 1 1 1.4 1.4l-2.1 2.1a2 2 0 0 0 2.9 2.9l2.1-2.1a1 1 0 1 1 1.4 1.4l-2.1 2.1a4 4 0 0 1-2.8 1.1zm8.5-6.1a1 1 0 0 1-.7-1.7l2.1-2.1a2 2 0 0 0-2.9-2.9l-2.1 2.1A1 1 0 1 1 11.3 7l2.1-2.1a4 4 0 0 1 5.7 5.7L17 12.7a1 1 0 0 1-.7.3z"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><path d="M7 2h2v2h6V2h2v2h3a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3zm12 7H5v10h14zM7 11h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2zm-8 4h2v2H7zm4 0h2v2h-2z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-2.1 2.1L9 20.4 21.3 8.1 19.2 6z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+</svg>
+
+<!-- Unified master resume (2026-11-18): union of base, Buoyant final and Temporal versions.
+     Not page-limited; trim a copy to 1 page when tailoring for a specific role. -->
+<header>
+  <h1>Eric Wohltman</h1>
+  <p class="title">Senior Lead Software Engineer<span>|</span>Kubernetes Controllers &amp; Distributed Systems<span>|</span>Go · Rust</p>
+  <ul class="contact">
+    <li><svg class="i"><use href="#i-phone"/></svg>646-701-1860</li>
+    <li><svg class="i"><use href="#i-at"/></svg><a href="mailto:eric.wohltman@gmail.com">eric.wohltman@gmail.com</a></li>
+    <li><svg class="i"><use href="#i-link"/></svg><a href="https://www.linkedin.com/in/eric-wohltman/">linkedin.com/in/eric-wohltman</a></li>
+    <li><svg class="i"><use href="#i-link"/></svg><a href="https://github.com/ewohltman">github.com/ewohltman</a></li>
+    <li><svg class="i"><use href="#i-pin"/></svg>North Brunswick, NJ</li>
+  </ul>
+</header>
+
+<div class="cols">
+  <main>
+    <section>
+      <h2>Summary</h2>
+      <p>Software engineer at JPMorgan Chase since 2013, writing distributed <span class="nw">control-plane</span> systems in Go: Kubernetes controllers, operators and admission webhooks shipped as a product to thousands of internal tenant teams on every cluster in the firm's <span class="nw">private-cloud</span> estate, and an <span class="nw">event-driven</span> system that provisions resources across clusters. Debugs down to API server behavior. Rust and <span class="nw">kube-rs</span> in open source, plus a sharded Go service for ~640K users.</p>
+    </section>
+
+    <section>
+      <h2>Key Achievements</h2>
+      <div class="ach">
+        <svg><use href="#i-bolt"/></svg>
+        <div>
+          <h4>Operator startup: hours → seconds <span class="where">· JPMC</span></h4>
+          <p>OpenTelemetry tracing, metrics, and Go pprof profiling found that blind applies during the <span class="nw">Ingress/NetworkPolicy</span> operator's startup <span class="nw">re-reconcile</span> of thousands of objects were being throttled by <span class="nw">client-go</span>'s <span class="nw">client-side</span> rate limiter. Replaced them with an <span class="nw">in-memory</span> cache of target objects and <span class="nw">in-process</span> diffing, so only real changes reach the API server, cutting startup API writes by ~99%.</p>
+        </div>
+      </div>
+      <div class="ach">
+        <svg><use href="#i-bolt"/></svg>
+        <div>
+          <h4>Per-key ordering, no stalled event loop <span class="where">· ephemeral-roles</span></h4>
+          <p>An <span class="nw">hour-plus</span> Discord rate limit wedged a guild's work for 96+ minutes in production, sending its shard into a <span class="nw">zombie-reconnect</span> loop. Rebuilt event handling on <span class="nw">per-guild</span> ordered queues: bounded channels, <span class="nw">non-blocking</span> submit off the gateway read loop, a blocking fallback for undroppable events, and <span class="nw">per-call</span> deadlines.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Experience</h2>
+
+      <div class="entry">
+        <h3>Senior Lead Software Engineer</h3>
+        <p class="org">JPMorgan Chase &amp; Co. · Private Cloud Kubernetes Platform</p>
+        <p class="meta"><span><svg class="i"><use href="#i-cal"/></svg>02/2019 – Present</span><span><svg class="i"><use href="#i-pin"/></svg>Jersey City, NJ</span></p>
+        <ul>
+          <li>Design and personally implement Kubernetes controllers and operators in Go (<span class="nw">kubebuilder/controller-gen</span>, <span class="nw">controller-runtime</span>, <span class="nw">client-go</span>): CRDs and idempotent reconcile loops with leader election, running on hundreds of clusters globally for thousands of tenant teams, the platform's internal customers.</li>
+          <li>Built a namespace-provisioning controller, deployed on every cluster in the estate, that reconciles a standard set of ResourceQuotas, Roles and RoleBindings across tens of thousands of namespaces, giving every team fair resource guarantees in <span class="nw">multi-tenant</span> clusters and enforcing best practices.</li>
+          <li>Built an operator, deployed on every cluster in the estate, that turns a custom resource into Ingress and NetworkPolicies across tens of thousands of namespaces, enforcing firmwide <span class="nw">secure-networking</span> policy so the platform and its tenants can prove they meet audit requirements.</li>
+          <li>Designing and building a greenfield asynchronous system in Go that provisions resources across multiple Kubernetes clusters: <span class="nw">event-driven</span> components connected by NATS and Kafka, with state in CockroachDB.</li>
+          <li>Designed its protobuf models; generated and implemented the connectrpc/gRPC API server and Go clients; built the messaging layer: event types, publishers and subscribers, retries with backoff.</li>
+          <li>OpenTelemetry spans across the workflow traced a slow step to a Go API client <span class="nw">re-authenticating</span> on every call; added <span class="nw">concurrency-safe</span> OAuth2 token caching and reuse.</li>
+          <li>Own features from design to release with stakeholders and tenant teams, including admission webhooks and <span class="nw">self-service</span> Go tools that remove friction for teams adopting the platform.</li>
+          <li>Founded and run a cross-team Software Engineering Guild (biweekly, 6 years, peak ~30); wrote the Go coding standards adopted as the team grew from ~8 people to several times that; taught Rust in 2021 while learning it.</li>
+        </ul>
+      </div>
+
+      <div class="entry">
+        <h3>Earlier Roles</h3>
+        <p class="org">JPMorgan Chase &amp; Co.</p>
+        <p class="meta"><span><svg class="i"><use href="#i-cal"/></svg>06/2013 – 02/2019</span><span><svg class="i"><use href="#i-pin"/></svg>Jersey City, NJ</span></p>
+        <p class="roles">Cloud Service Owner, Application BackBone (ABB); Cloud Service Reliability Engineer (Associate → VP); DevOps Global Support Lead</p>
+        <ul>
+          <li>Pioneered Go on the team as the replacement for Java in microservice components of the firm's <span class="nw">next-generation</span> <span class="nw">private-cloud</span> PaaS.</li>
+          <li>Owned ABB, JPMC's first firmwide <span class="nw">private-cloud</span> PaaS, end to end, including its engineering and development.</li>
+        </ul>
+        <p class="roles">Before JPMC: Eventide, Service / QA Engineer (2012 – 2013) · West 58 Group, Linux Grid Computing Engineer consulting at JPMorgan Chase (2011 – 2012)</p>
+      </div>
+    </section>
+  </main>
+
+  <aside>
+    <section>
+      <h2>Skills</h2>
+      <div class="chips">
+        <span>Go</span><span>Rust (Tokio, Rayon)</span><span>Shell</span><span>Kubernetes</span><span>kubebuilder / <span class="nw">controller-gen</span></span><span class="nw">controller-runtime</span><span class="nw">client-go</span><span class="nw">kube-rs</span><span>CRDs &amp; schema generation</span><span>Reconciliation loops</span><span>Server-side apply</span><span>Status conditions</span><span>Admission webhooks</span><span>Leader election</span><span>Owner refs &amp; GC</span><span>RBAC</span><span>Ingress &amp; NetworkPolicy</span><span>Protobuf</span><span>gRPC / connectrpc</span><span>NATS</span><span>Kafka</span><span>Event-driven</span><span>Rate limiting &amp; backpressure</span><span>Sharding</span><span>Envoy / Contour</span><span>OpenTelemetry</span><span>Prometheus</span><span>Grafana</span><span>pprof</span><span>Argo CD</span><span>Docker</span><span>GitHub Actions</span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Open Source</h2>
+
+      <div class="proj">
+        <h4><a href="https://github.com/ewohltman/fah-operator"><span class="nw">fah-operator</span></a> <span class="stack">— Rust, <span class="nw">kube-rs</span></span></h4>
+        <ul>
+          <li>Reconciles a FoldingAtHome custom resource into an owner-referenced DaemonSet and ServiceAccount on every node with server-side apply; donates a personal cluster's idle CPU to Alzheimer's research.</li>
+          <li>Label-scoped watches; <code>Ready</code> condition and node counts in <code>status</code>, written only on change; Lease leader election; CRD schema generated from Rust types and drift-checked in CI with clippy <code>-D warnings</code> and 12 unit tests.</li>
+        </ul>
+      </div>
+
+      <div class="proj">
+        <h4><a href="https://github.com/ewohltman/ephemeral-roles">ephemeral-roles</a> <span class="stack">— Go, Kubernetes · <span class="nw">2017 – Present</span></span></h4>
+        <ul>
+          <li>Public Discord bot serving ~640K users across 2,200+ servers (<a class="inline" href="http://grafana.ephemeral-roles.net/d/OqANQqtiz/ephemeral-roles-metrics?orgId=1&amp;refresh=5s">live metrics</a>); listed in Awesome Go, ~100 GitHub stars.</li>
+          <li>One gateway shard per pod in a 10-pod StatefulSet, sharding guild load by stable pod identity; a readiness gate holds the ordered rollout until each shard is ready, avoiding IDENTIFY <span class="nw">rate-limit</span> collisions.</li>
+          <li>Coalesces identical concurrent API mutations (singleflight); <a class="inline" href="https://github.com/ewohltman/pod-bouncer">pod-bouncer</a>, a companion Go service, restarts unhealthy pods from Alertmanager webhooks.</li>
+        </ul>
+      </div>
+
+      <div class="proj">
+        <h4><a href="https://github.com/ewohltman/genetic-sudoku"><span class="nw">genetic-sudoku</span></a> <span class="stack">— Rust, Rayon</span></h4>
+        <ul>
+          <li>Multithreaded <span class="nw">genetic-algorithm</span> solver with elitism, memetic local search and restarts: Rayon <span class="nw">data-parallel</span> scoring and breeding; snapshots stream to the renderer over a bounded channel.</li>
+        </ul>
+      </div>
+
+      <div class="proj">
+        <h4>Community</h4>
+        <ul>
+          <li><a class="inline" href="https://github.com/ewohltman/kubecon2019">KubeCon + EnvoyCon 2019 notes</a> (26 stars); <a class="inline" href="https://github.com/ewohltman/discordgo-mock"><span class="nw">discordgo-mock</span></a> test library (22 stars).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
+      <h2>Education</h2>
+      <div class="entry">
+        <h3>B.S., Electrical and Computer Engineering</h3>
+        <p class="org">Rutgers University</p>
+        <p class="meta"><span><svg class="i"><use href="#i-cal"/></svg>2010</span><span><svg class="i"><use href="#i-pin"/></svg>New Brunswick, NJ</span></p>
+      </div>
+      <div class="entry">
+        <h3>Expert Engineer (E2) Program</h3>
+        <p class="org">JPMorgan Chase &amp; Co. · 2018 graduate</p>
+        <p class="roles">Firmwide program for <span class="nw">high-potential</span> engineers; one of 100 selected for the 2018 cohort.</p>
+      </div>
+    </section>
+  </aside>
+</div>
+
+</body>
+</html>
+</script>
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const HTML = $("#resume-html").textContent.replace(/^\n/, "");
+  const N = [...HTML].length.toLocaleString();
+  const SVGNS = "http://www.w3.org/2000/svg";
+
+  /* theme */
+  const root = document.documentElement;
+  const dark = () => root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const paint = () => { $("#themeBtn").textContent = dark() ? "☀ Light" : "☾ Dark"; };
+  $("#themeBtn").onclick = () => { root.dataset.theme = dark() ? "light" : "dark"; try { localStorage.setItem("theme", root.dataset.theme); } catch (e) {} paint(); };
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paint);
+  paint();
+
+  /* nodes: id, x, y, w, h, tag, title, detail */
+  const NODES = [
+    ["yml", 20, 24, 200, 66, "YOU", "resume.yml", "kind: Webpage"],
+    ["api", 20, 158, 200, 66, "CONTROL PLANE", "kube-apiserver", "schema + CEL check"],
+    ["op", 20, 292, 200, 66, "OPERATOR", "rust-operator", "reconcile()"],
+    ["dep", 290, 74, 190, 62, "CHILD", "Deployment resume", "nginx × replicas"],
+    ["pod", 290, 182, 190, 62, "CREATED BY K8S", "Pod nginx", ":80 /usr/share/nginx/html"],
+    ["cm", 290, 290, 190, 62, "CHILD", "ConfigMap resume", "index.html = spec.html"],
+    ["route", 510, 74, 190, 62, "CHILD", "HTTPRoute resume", "resume.ephemeral-roles.net"],
+    ["svc", 510, 182, 190, 62, "CHILD", "Service resume", "port 80 → pods"],
+    ["browser", 780, 24, 200, 66, "INTERNET", "Browser", "GET https://resume…/"],
+    ["gw", 780, 158, 200, 66, "SHARED GATEWAY", "Envoy Gateway", "public / https-wildcard"],
+  ];
+  /* edges: id, class, path, label, lx, ly */
+  const EDGES = [
+    ["e-apply", "ctl", "M120 90 V156", "kubectl apply", 128, 128],
+    ["e-watch", "ctl", "M90 224 V290", "watch event", 14, 262],
+    ["e-status", "ctl", "M190 292 V226", "status", 150, 262],
+    ["e-ssa", "ctl", "M220 325 H268", "apply ×5", 222, 316],
+    ["e-creates", "k8s", "M385 136 V180", "creates", 392, 163],
+    ["e-mount", "k8s", "M385 290 V246", "mounted", 392, 273],
+    ["e-https", "net", "M880 90 V156", "HTTPS", 888, 128],
+    ["e-host", "net", "M780 191 H745 V105 H702", "Host match", 712, 96],
+    ["e-route", "net", "M605 136 V180", "backendRef", 612, 163],
+    ["e-svc", "net", "M510 213 H482", "", 484, 204],
+  ];
+
+  const nodesG = $("#nodes"), edgesG = $("#edges");
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; };
+  for (const [id, cls, d, label, lx, ly] of EDGES) {
+    el("path", { id, class: `edge ${cls}`, d, "marker-end": `url(#m-${cls})` }, edgesG);
+    el("text", { class: `elabel ${cls}`, "data-for": id, x: lx, y: ly }, edgesG).textContent = label;
+  }
+  for (const [id, x, y, w, h, tag, title, d] of NODES) {
+    const g = el("g", { class: "node", tabindex: 0, role: "button", "data-id": id, "aria-label": title }, nodesG);
+    el("rect", { x, y, width: w, height: h, rx: 10 }, g);
+    el("text", { class: "tag", x: x + 12, y: y + 18 }, g).textContent = tag;
+    el("text", { class: "t", x: x + 12, y: y + 37 }, g).textContent = title;
+    el("text", { class: "d", x: x + 12, y: y + 54 }, g).textContent = d;
+  }
+
+  const INFO = {
+    yml: ["The input", `One <code>Webpage</code> named <code>resume</code>. <code>spec.html</code> is the whole resume (${N} chars) and <code>spec.replicas</code> is 1. The name sets both the namespace (<code>wp-resume</code>) and the hostname (<code>resume.ephemeral-roles.net</code>).`],
+    api: ["Validated and stored", `The CRD is generated from <code>WebpageSpec</code> in <code>src/lib.rs</code>. Its schema rejects HTML that is too long or has no <code>&lt;!doctype html&gt;</code>, and it fills in <code>replicas: 1</code> if missing. Bad objects fail at <code>kubectl apply</code> and never reach the operator.`],
+    op: ["reconcile()", `A kube-rs <code>Controller</code> watches Webpages. On each event it calls <code>reconcile</code>, which builds the desired objects with pure <code>desired_*</code> functions and server-side applies them as field manager <code>rust-operator</code>. On failure it retries in 5 s. When the site is ready it resyncs every 5 min.`],
+    ns: ["Namespace wp-resume", `The operator applies the namespace first, with the Webpage as its owner. Then it reads the namespace back for its <code>uid</code> and makes the namespace the owner of all four children, which it applies concurrently with <code>tokio::join!</code>. The <code>public-gateway</code> label allows this namespace's routes to attach to the shared Gateway, and <code>linkerd.io/inject=enabled</code> puts its pods on the Linkerd mesh.`],
+    dep: ["Deployment", `Runs <code>spec.replicas</code> × the stock <code>nginx</code> image, with the ConfigMap mounted read-only over nginx's web root.`],
+    pod: ["nginx pod", `Kubernetes creates it (through a ReplicaSet) from the Deployment. It serves <code>index.html</code> on port 80. The operator never creates Pods directly.`],
+    cm: ["ConfigMap", `<code>data["index.html"]</code> is <code>spec.html</code>, copied byte for byte. This is where the resume actually lives inside the cluster.`],
+    route: ["HTTPRoute", `A Gateway API route: hostname <code>resume.ephemeral-roles.net</code>, path prefix <code>/</code>, backend <code>Service resume:80</code>, parent <code>envoy-gateway-system/public</code> listener <code>https-wildcard</code>.`],
+    svc: ["Service", `Port 80 (<code>http</code>). It selects pods by the labels <code>app.kubernetes.io/instance=webpage-resume</code>, <code>app.kubernetes.io/name=webpage</code>, and <code>app.kubernetes.io/managed-by=rust-operator</code>.`],
+    browser: ["Visitor", `A browser requests <code>https://resume.ephemeral-roles.net/</code>. Wildcard DNS for <code>*.ephemeral-roles.net</code> points at the cluster's public load balancer.`],
+    gw: ["Envoy Gateway", `The shared <code>public</code> Gateway terminates TLS for the wildcard hostname and picks the HTTPRoute whose hostname matches. The operator isn't in this path at all; it only wrote the objects.`],
+  };
+
+  const FLOWS = {
+    build: [
+      { n: ["yml"], e: ["e-apply"], s: "Step 1/6", t: "You apply resume.yml", p: `<code>kubectl apply -f resume.yml</code> sends one Webpage with ${N} chars of HTML to the API server.` },
+      { n: ["api"], e: ["e-apply"], s: "Step 2/6", t: "The API server validates it", p: INFO.api[1] },
+      { n: ["op"], e: ["e-watch"], s: "Step 3/6", t: "The operator gets a watch event", p: INFO.op[1] },
+      { n: ["ns"], e: ["e-ssa"], s: "Step 4/6", t: "Namespace wp-resume is applied", p: INFO.ns[1] },
+      { n: ["ns", "dep", "cm", "svc", "route"], e: ["e-ssa"], s: "Step 5/6", t: "Four children are applied at the same time", p: `ConfigMap (the HTML), Deployment (nginx), Service (port 80), and HTTPRoute (the hostname). Kubernetes then creates the nginx Pod and mounts the ConfigMap into it.` },
+      { n: ["ns", "pod", "dep", "cm", "op", "api"], e: ["e-creates", "e-mount", "e-status"], s: "Step 6/6", t: "Pods come up and status is reported", p: `The operator reads the Deployment's <code>readyReplicas</code> and writes it, with <code>observedGeneration</code>, to the Webpage's status subresource. That is the only write it makes to its own resource.` },
+    ],
+    visit: [
+      { n: ["browser"], e: [], s: "Hop 1/5", t: "A browser opens the URL", p: INFO.browser[1] },
+      { n: ["gw"], e: ["e-https"], s: "Hop 2/5", t: "Envoy Gateway takes the request", p: INFO.gw[1] },
+      { n: ["ns", "route"], e: ["e-host"], s: "Hop 3/5", t: "The HTTPRoute matches the hostname", p: INFO.route[1] },
+      { n: ["ns", "svc"], e: ["e-route"], s: "Hop 4/5", t: "The Service picks a ready pod", p: INFO.svc[1] },
+      { n: ["ns", "pod", "cm"], e: ["e-svc", "e-mount"], s: "Hop 5/5", t: "nginx returns index.html", p: `nginx reads <code>/usr/share/nginx/html/index.html</code>, which is the mounted ConfigMap, which is <code>spec.html</code>. The resume shown below is that file.` },
+    ],
+  };
+
+  const svg = $("#flow"), info = $("#info");
+  const all = (s) => svg.querySelectorAll(s);
+  const setInfo = (step, t, p) => { info.innerHTML = `<div class="step">${step}</div><h2>${t}</h2><p>${p}</p>`; };
+  let timer = null;
+
+  function clear() { all(".on").forEach((x) => x.classList.remove("on")); all(".sel").forEach((x) => x.classList.remove("sel", "net")); }
+  function stop() {
+    clearInterval(timer); timer = null;
+    svg.classList.remove("playing", "playing-net"); clear();
+    $("#playBuild").setAttribute("aria-pressed", "false"); $("#playVisit").setAttribute("aria-pressed", "false");
+    $("#playBuild").textContent = "▶ Build it"; $("#playVisit").textContent = "▶ Serve a visit";
+  }
+  function frame(st) {
+    clear();
+    st.n.forEach((id) => svg.querySelector(`.node[data-id="${id}"]`).classList.add("on"));
+    st.e.forEach((id) => { $("#" + id).classList.add("on"); svg.querySelector(`[data-for="${id}"]`).classList.add("on"); });
+    setInfo(st.s, st.t, st.p);
+  }
+  function play(name, btn, label) {
+    const wasThis = btn.getAttribute("aria-pressed") === "true";
+    stop();
+    if (wasThis) return intro();
+    const steps = FLOWS[name]; let i = 0;
+    svg.classList.add("playing"); if (name === "visit") svg.classList.add("playing-net");
+    btn.setAttribute("aria-pressed", "true"); btn.textContent = "⏸ Stop";
+    frame(steps[0]);
+    timer = setInterval(() => { i = (i + 1) % steps.length; frame(steps[i]); }, 3200);
+  }
+  $("#playBuild").onclick = (e) => play("build", e.currentTarget);
+  $("#playVisit").onclick = (e) => play("visit", e.currentTarget);
+
+  const NET = new Set(["browser", "gw", "route", "svc"]);
+  svg.querySelectorAll(".node").forEach((g) => {
+    const pick = (ev) => {
+      ev.stopPropagation(); stop();
+      const id = g.dataset.id; g.classList.add("sel"); if (NET.has(id)) g.classList.add("net");
+      setInfo("Selected", INFO[id][0], INFO[id][1]);
+    };
+    g.addEventListener("click", pick);
+    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(ev); } });
+  });
+  const intro = () => setInfo("Overview", "Two flows, one result",
+    `<span style="color:var(--ctl)">Orange</span>: the operator turns the Webpage into a namespace with four objects. <span style="color:var(--net)">Blue</span>: a visitor's request goes through Envoy Gateway to nginx, which serves <code>spec.html</code>. Press a ▶ button to step through a flow.`);
+  intro();
+
+  /* input YAML (first lines) */
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const head = `<span class="yk">apiVersion</span>: <span class="ys">demo.ephemeral-roles.net/v1alpha1</span>
+<span class="yk">kind</span>: <span class="ys">Webpage</span>
+<span class="yk">metadata</span>:
+  <span class="yk">name</span>: <span class="ys">resume</span>
+<span class="yk">spec</span>:
+  <span class="yk">replicas</span>: <span class="yn">1</span>
+  <span class="yk">html</span>: |
+`;
+  const lines = HTML.split("\n");
+  $("#yaml").innerHTML = head + esc(lines.slice(0, 5).map((l) => "    " + l).join("\n")) +
+    `\n    <span class="yc"># … ${lines.length - 5} more lines</span>`;
+  $("#size").textContent = `${N} chars of HTML`;
+
+  /* scaled live preview */
+  const fr = $("#preview"), vp = $("#viewport");
+  fr.srcdoc = HTML;
+  const fit = () => { const s = vp.clientWidth / 1000; fr.style.transform = `scale(${s})`; vp.style.height = Math.round(1300 * s * 0.62) + "px"; };
+  new ResizeObserver(fit).observe(vp); fit();
+})();
+</script>
+</body>
+</html>

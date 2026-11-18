@@ -1,20 +1,23 @@
 use futures::StreamExt;
+use gateway_api::httproutes::HttpRoute;
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{ConfigMap, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Service};
+use k8s_openapi::serde::Serialize;
 use kube::api::{ListParams, Patch};
 use kube::config::KubeConfigOptions;
 use kube::core::params;
-use kube::runtime::controller::Action;
+use kube::runtime::controller::{Action, Error};
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, Resource, ResourceExt};
 use rust_operator::{
     Context, MANAGER, ReconcileError, ReconcileResult, Webpage, WebpageStatus, error_policy,
     kind_cluster_guard,
 };
+use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tracing::instrument(skip(wp, ctx))]
 async fn reconcile(wp: Arc<Webpage>, ctx: Arc<Context>) -> ReconcileResult<Action> {
@@ -31,23 +34,66 @@ async fn reconcile(wp: Arc<Webpage>, ctx: Arc<Context>) -> ReconcileResult<Actio
 
     info!(%namespace, %name, "apply");
 
-    let cm = rust_operator::desired_config_map(&wp, &namespace, &name, &controller_ref);
-    let dep = rust_operator::desired_deployment(&wp, &namespace, &name, &controller_ref);
-    let service = rust_operator::desired_service(&namespace, &name, &controller_ref);
+    let ns = rust_operator::desired_namespace(&name, &controller_ref);
+    let Some(ns_name) = ns.metadata.clone().name else {
+        return Err(ReconcileError::EmptyDesiredNamespace);
+    };
 
-    let (res_cm, res_dep, res_service) = tokio::join!(
-        apply(&namespace, &name, &params, cm, &ctx),
-        apply(&namespace, &name, &params, dep, &ctx),
-        apply(&namespace, &name, &params, service, &ctx),
-    );
+    apply(
+        Api::<Namespace>::all(ctx.client.clone()),
+        &ns_name,
+        &params,
+        ns.clone(),
+    )
+    .await?;
 
-    res_cm?;
-    res_dep?;
-    res_service?;
+    let ns = Api::<Namespace>::all(ctx.client.clone())
+        .get(&ns_name)
+        .await?;
+
+    let owner_ref = ns
+        .controller_owner_ref(&())
+        .ok_or(ReconcileError::EmptyControllerOwnerReference)?;
+
+    let results: [Result<(), ReconcileError>; 4] = tokio::join!(
+        apply(
+            Api::<ConfigMap>::namespaced(ctx.client.clone(), &ns_name),
+            &name,
+            &params,
+            rust_operator::desired_config_map(&wp, &name, &owner_ref)
+        ),
+        apply(
+            Api::<Deployment>::namespaced(ctx.client.clone(), &ns_name),
+            &name,
+            &params,
+            rust_operator::desired_deployment(&wp, &name, &owner_ref)
+        ),
+        apply(
+            Api::<Service>::namespaced(ctx.client.clone(), &ns_name),
+            &name,
+            &params,
+            rust_operator::desired_service(&name, &owner_ref)
+        ),
+        apply(
+            Api::<HttpRoute>::namespaced(ctx.client.clone(), &ns_name),
+            &name,
+            &params,
+            rust_operator::desired_http_route(&name, &owner_ref)
+        )
+    )
+    .into();
+
+    for res in results {
+        res?;
+    }
 
     info!(%namespace, %name, "apply status");
 
-    let actual_status = actual_status(&wp, &namespace, &name, &ctx).await?;
+    let actual_status = actual_status(
+        Api::<Deployment>::namespaced(ctx.client.clone(), &ns_name),
+        &wp,
+    )
+    .await?;
     apply_status::<Webpage>(
         &ctx,
         &namespace,
@@ -67,14 +113,12 @@ async fn reconcile(wp: Arc<Webpage>, ctx: Arc<Context>) -> ReconcileResult<Actio
 }
 
 async fn actual_status(
+    api: Api<Deployment>,
     wp: &Webpage,
-    namespace: &str,
-    name: &str,
-    ctx: &Arc<Context>,
 ) -> Result<WebpageStatus, ReconcileError> {
     Ok(WebpageStatus {
-        ready_replicas: Api::<Deployment>::namespaced(ctx.client.clone(), namespace)
-            .get(name)
+        ready_replicas: api
+            .get(&wp.name_any())
             .await?
             .status
             .unwrap_or_default()
@@ -84,27 +128,20 @@ async fn actual_status(
     })
 }
 
-#[tracing::instrument(skip(ctx, params, k))]
+#[tracing::instrument(skip(api, params, k))]
 async fn apply<K>(
-    namespace: &str,
+    api: Api<K>,
     name: &str,
     params: &params::PatchParams,
     k: K,
-    ctx: &Arc<Context>,
 ) -> Result<(), ReconcileError>
 where
-    K: std::fmt::Debug,
-    K: std::clone::Clone,
-    K: Resource<Scope = NamespaceResourceScope>
-        + k8s_openapi::serde::Serialize
-        + serde::de::DeserializeOwned,
-    <K as kube::Resource>::DynamicType: std::default::Default,
+    K: Resource + Clone + std::fmt::Debug + Serialize + DeserializeOwned,
+    K::DynamicType: Default,
 {
     let dynamic_resource = <K as Resource>::DynamicType::default();
     let kind = K::kind(&dynamic_resource);
-    info!(%namespace, %name, kind = kind.to_string(), "apply");
-
-    let api: Api<K> = Api::namespaced(ctx.client.clone(), namespace);
+    info!(%name, kind = kind.to_string(), "apply");
     api.patch(name, params, &Patch::Apply(k)).await?;
     Ok(())
 }
@@ -120,9 +157,7 @@ async fn apply_status<K>(
 where
     K: std::fmt::Debug,
     K: std::clone::Clone,
-    K: Resource<Scope = NamespaceResourceScope>
-        + k8s_openapi::serde::Serialize
-        + serde::de::DeserializeOwned,
+    K: Resource<Scope = NamespaceResourceScope> + Serialize + DeserializeOwned,
     <K as kube::Resource>::DynamicType: std::default::Default,
 {
     let api: Api<K> = Api::namespaced(ctx.client.clone(), namespace);
@@ -175,16 +210,25 @@ async fn main() -> anyhow::Result<()> {
 
     Controller::new(api, watcher::Config::default())
         .shutdown_on_signal()
+        .owns(Api::<Namespace>::all(client.clone()), config.clone())
         .owns(Api::<ConfigMap>::all(client.clone()), config.clone())
         .owns(Api::<Deployment>::all(client.clone()), config.clone())
-        .owns(Api::<Service>::all(client.clone()), config)
+        .owns(Api::<Service>::all(client.clone()), config.clone())
+        .owns(Api::<HttpRoute>::all(client.clone()), config)
         .run(reconcile, error_policy, Arc::new(Context { client }))
         .for_each(|result| {
             match result {
                 Ok((obj_ref, action)) => {
                     info!(obj_ref = %obj_ref, action = ?action, "reconcile complete");
                 }
-                Err(err) => error!(err = %err, "reconcile error"),
+                Err(err) => match err {
+                    Error::ObjectNotFound(obj_ref) => warn!(%obj_ref, "object not found"),
+                    Error::ReconcilerFailed(err, obj_ref) => {
+                        error!(%obj_ref, %err, "reconcile error");
+                    }
+                    Error::QueueError(err) => error!(%err, "queue error"),
+                    Error::RunnerError(err) => error!(%err, "runner error"),
+                },
             }
 
             futures::future::ready(())

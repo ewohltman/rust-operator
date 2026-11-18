@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rust-operator
+  labels:
+    app.kubernetes.io/name: rust-operator
+    pod-security.kubernetes.io/enforce: restricted

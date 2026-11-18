@@ -1,7 +1,11 @@
+use gateway_api::httproutes::{
+    HttpRoute, HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs,
+    HttpRouteRulesMatches, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType, HttpRouteSpec,
+};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, PodSpec, PodTemplateSpec, Service,
-    ServicePort, ServiceSpec, Volume, VolumeMount,
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, Namespace, NamespaceSpec, PodSpec,
+    PodTemplateSpec, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use kube::config;
@@ -88,6 +92,9 @@ pub enum ReconcileError {
     #[error("namespace not set")]
     EmptyNamespace,
 
+    #[error("desired namespace name not set")]
+    EmptyDesiredNamespace,
+
     #[error("controller owner reference not set")]
     EmptyControllerOwnerReference,
 
@@ -142,14 +149,31 @@ pub fn kind_cluster_guard() -> Result<config::Kubeconfig> {
     }
 }
 
+const WP_NAMESPACE_PREFIX: &str = "wp";
+
+const PUBLIC_GATEWAY_LABEL: &str = "ephemeral-roles.net/public-gateway";
+
 #[must_use]
-pub fn desired_object_meta(
-    namespace: &str,
-    name: &str,
-    controller_ref: &OwnerReference,
-) -> ObjectMeta {
+pub fn desired_namespace(name: &str, controller_ref: &OwnerReference) -> Namespace {
+    let mut labels = match_labels(name);
+    labels.insert(PUBLIC_GATEWAY_LABEL.to_string(), "true".to_string());
+    labels.insert("linkerd.io/inject".to_string(), "enabled".to_string());
+
+    Namespace {
+        metadata: ObjectMeta {
+            name: Some(format!("{WP_NAMESPACE_PREFIX}-{name}")),
+            labels: Some(labels),
+            owner_references: Some(vec![controller_ref.clone()]),
+            ..Default::default()
+        },
+        spec: Some(NamespaceSpec::default()),
+        ..Default::default()
+    }
+}
+
+#[must_use]
+pub fn desired_object_meta(name: &str, controller_ref: &OwnerReference) -> ObjectMeta {
     ObjectMeta {
-        namespace: Some(namespace.to_string()),
         name: Some(name.to_string()),
         labels: Some(match_labels(name)),
         owner_references: Some(vec![controller_ref.clone()]),
@@ -160,14 +184,9 @@ pub fn desired_object_meta(
 const INDEX_FILE: &str = "index.html";
 
 #[must_use]
-pub fn desired_config_map(
-    wp: &Webpage,
-    namespace: &str,
-    name: &str,
-    controller_ref: &OwnerReference,
-) -> ConfigMap {
+pub fn desired_config_map(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> ConfigMap {
     ConfigMap {
-        metadata: desired_object_meta(namespace, name, controller_ref),
+        metadata: desired_object_meta(name, controller_ref),
         data: Some(BTreeMap::from([(
             INDEX_FILE.to_string(),
             wp.spec.html.clone(),
@@ -177,14 +196,9 @@ pub fn desired_config_map(
 }
 
 #[must_use]
-pub fn desired_deployment(
-    wp: &Webpage,
-    namespace: &str,
-    name: &str,
-    controller_ref: &OwnerReference,
-) -> Deployment {
+pub fn desired_deployment(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> Deployment {
     Deployment {
-        metadata: desired_object_meta(namespace, name, controller_ref),
+        metadata: desired_object_meta(name, controller_ref),
         spec: DeploymentSpec {
             replicas: Some(wp.spec.replicas),
             selector: LabelSelector {
@@ -233,9 +247,9 @@ pub fn desired_deployment(
 const DEFAULT_FILE_LOCATION: &str = "/usr/share/nginx/html";
 
 #[must_use]
-pub fn desired_service(namespace: &str, name: &str, controller_ref: &OwnerReference) -> Service {
+pub fn desired_service(name: &str, controller_ref: &OwnerReference) -> Service {
     Service {
-        metadata: desired_object_meta(namespace, name, controller_ref),
+        metadata: desired_object_meta(name, controller_ref),
         spec: Some(ServiceSpec {
             selector: Some(match_labels(name)),
             ports: Some(vec![ServicePort {
@@ -245,6 +259,47 @@ pub fn desired_service(namespace: &str, name: &str, controller_ref: &OwnerRefere
             }]),
             ..Default::default()
         }),
+        ..Default::default()
+    }
+}
+
+#[must_use]
+pub fn desired_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRoute {
+    let parent_ref = HttpRouteParentRefs {
+        name: "public".to_string(),
+        namespace: Some("envoy-gateway-system".to_string()),
+        section_name: Some("https-wildcard".to_string()),
+        ..Default::default()
+    };
+
+    let rule_match = HttpRouteRulesMatches {
+        path: Some(HttpRouteRulesMatchesPath {
+            r#type: Some(HttpRouteRulesMatchesPathType::PathPrefix),
+            value: Some("/".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    let backend_ref = HttpRouteRulesBackendRefs {
+        kind: Some("Service".to_string()),
+        name: name.to_string(),
+        port: Some(PORT_NUMBER),
+        ..Default::default()
+    };
+
+    let rules = HttpRouteRules {
+        matches: Some(vec![rule_match]),
+        backend_refs: Some(vec![backend_ref]),
+        ..Default::default()
+    };
+
+    HttpRoute {
+        metadata: desired_object_meta(name, controller_ref),
+        spec: HttpRouteSpec {
+            hostnames: Some(vec![format!("{name}.ephemeral-roles.net")]),
+            parent_refs: Some(vec![parent_ref]),
+            rules: Some(vec![rules]),
+        },
         ..Default::default()
     }
 }
@@ -265,44 +320,59 @@ mod desired_tests {
     use super::*;
 
     const NAME: &str = "test-name";
-    const NAMESPACE: &str = "test-ns";
+    const EXPECTED_NAMESPACE: &str = const_format::concatcp!(WP_NAMESPACE_PREFIX, "-", NAME);
     const UID: &str = "test-uid";
     const EXPECTED_HTML: &str = "<!doctype html><html></html>";
     const EXPECTED_REPLICAS: i32 = 2;
 
     #[test]
+    fn test_desired_namespace() {
+        let (_, controller_ref) = new_webpage_controller_ref();
+        let namespace = desired_namespace(NAME, &controller_ref);
+        assert_eq!(namespace.metadata.name.unwrap(), EXPECTED_NAMESPACE);
+
+        let labels = namespace.metadata.labels.unwrap();
+        assert_eq!(*labels.get(PUBLIC_GATEWAY_LABEL).unwrap(), true.to_string());
+
+        assert!(namespace.spec.is_some());
+    }
+
+    #[test]
     fn test_desired_object_meta() {
         let (_, controller_ref) = new_webpage_controller_ref();
-        let om = desired_object_meta(NAMESPACE, NAME, &controller_ref);
-        assert_eq!(om.namespace.unwrap(), NAMESPACE);
+        let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
+        let om = desired_object_meta(NAME, &owner_ref);
         assert_eq!(om.name.unwrap(), NAME);
         assert_eq!(om.labels.unwrap(), match_labels(NAME));
-        assert_eq!(om.owner_references.unwrap(), vec![controller_ref]);
+        assert_eq!(om.owner_references.unwrap(), vec![owner_ref]);
     }
 
     #[test]
     fn test_desired_config_map() {
         let (wp, controller_ref) = new_webpage_controller_ref();
-        let cm = desired_config_map(&wp, NAMESPACE, NAME, &controller_ref);
+        let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
+        let cm = desired_config_map(&wp, NAME, &owner_ref);
         assert_eq!(cm.data.unwrap().get(INDEX_FILE).unwrap(), EXPECTED_HTML);
     }
 
     #[test]
     fn test_desired_deployment() {
         let (wp, controller_ref) = new_webpage_controller_ref();
-        let dep = desired_deployment(&wp, NAMESPACE, NAME, &controller_ref);
+        let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
+        let dep = desired_deployment(&wp, NAME, &owner_ref);
         assert_eq!(dep.spec.replicas.unwrap(), EXPECTED_REPLICAS);
     }
 
     #[test]
     fn test_desired_service() {
         let (wp, controller_ref) = new_webpage_controller_ref();
-        let service = desired_service(NAMESPACE, NAME, &controller_ref);
+        let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
+        let service = desired_service(NAME, &owner_ref);
 
         let spec = service.spec.unwrap();
         let selector = spec.selector.unwrap();
 
-        let dep = desired_deployment(&wp, NAMESPACE, NAME, &controller_ref);
+        let dep = desired_deployment(&wp, NAME, &controller_ref);
         let pod_labels = dep.spec.template.metadata.unwrap().labels.unwrap();
 
         assert_eq!(selector, pod_labels);
@@ -324,6 +394,55 @@ mod desired_tests {
         assert_eq!(status.observed_generation, wp.metadata.generation);
     }
 
+    #[test]
+    fn test_desired_http_route() {
+        let (_, controller_ref) = new_webpage_controller_ref();
+        let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
+
+        let http_route = desired_http_route(NAME, &owner_ref);
+        assert_eq!(http_route.metadata.name.unwrap(), NAME);
+
+        let spec = http_route.spec;
+        assert_eq!(
+            spec.hostnames.unwrap(),
+            vec![format!("{NAME}.ephemeral-roles.net")]
+        );
+
+        let parent_refs = spec.parent_refs.unwrap();
+        assert_eq!(parent_refs.len(), 1);
+
+        let parent_ref = parent_refs.into_iter().next().unwrap();
+        assert_eq!(parent_ref.name, "public");
+        assert_eq!(parent_ref.namespace.unwrap(), "envoy-gateway-system");
+        assert_eq!(parent_ref.section_name.unwrap(), "https-wildcard");
+
+        let rules = spec.rules.unwrap();
+        assert_eq!(rules.len(), 1);
+
+        let rule = rules.into_iter().next().unwrap();
+        let path = rule
+            .matches
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .path
+            .unwrap();
+        assert_eq!(
+            path.r#type.unwrap(),
+            HttpRouteRulesMatchesPathType::PathPrefix
+        );
+        assert_eq!(path.value.unwrap(), "/");
+
+        let backend_refs = rule.backend_refs.unwrap();
+        assert_eq!(backend_refs.len(), 1);
+
+        let backend_ref = backend_refs.into_iter().next().unwrap();
+        assert_eq!(backend_ref.kind.unwrap(), "Service");
+        assert_eq!(backend_ref.name, NAME);
+        assert_eq!(backend_ref.port.unwrap(), PORT_NUMBER);
+    }
+
     fn new_webpage_controller_ref() -> (Webpage, OwnerReference) {
         let mut wp = Webpage::new(
             NAME,
@@ -340,6 +459,21 @@ mod desired_tests {
             .unwrap();
 
         (wp, controller_ref)
+    }
+
+    fn new_namespace_controller_ref(
+        name: &str,
+        controller_ref: &OwnerReference,
+    ) -> (Namespace, OwnerReference) {
+        let mut ns = desired_namespace(name, controller_ref);
+        ns.metadata.uid = Some(UID.to_string());
+
+        (
+            ns.clone(),
+            ns.controller_owner_ref(&())
+                .ok_or(ReconcileError::EmptyControllerOwnerReference)
+                .unwrap_or_default(),
+        )
     }
 }
 
