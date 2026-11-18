@@ -8,7 +8,7 @@ and the operator serves it with nginx: it creates a ConfigMap, a Deployment, and
 keeps them in sync with the resource, and reports status back on it.
 
 ```yaml
-apiVersion: demo.example.com/v1alpha1
+apiVersion: demo.ephemeral-roles.net/v1alpha1
 kind: Webpage
 metadata:
   name: hello
@@ -21,23 +21,26 @@ spec:
 
 ## Status
 
-Steps 0–9 of [`LEARN.md`](LEARN.md) are done (see its progress checklist). What exists today:
+Steps 0–10 of [`LEARN.md`](LEARN.md) are done (see its progress checklist). What exists today:
 
-- **`Webpage` CRD** (`demo.example.com/v1alpha1`), defined in `src/lib.rs` with a schema
+- **`Webpage` CRD** (`demo.ephemeral-roles.net/v1alpha1`), defined in `src/lib.rs` with a schema
   default for `replicas` and a CEL rule requiring `html` to be a full document. The generated
   manifest is committed as `manifests/crd.json`, and a unit test fails if it drifts.
-- **Shared library code**: a `thiserror` error type, a `tracing` setup, and the kind-context
-  guard that refuses to talk to any cluster whose context doesn't start with `kind-`.
+- **Shared library code**: `thiserror` error types, a `tracing` setup, the kind-context guard
+  that refuses to talk to any cluster whose context doesn't start with `kind-`, and pure
+  `desired_*` builders for the child resources, each with a unit test.
 - **Exercises** for steps 2–7 in `examples/`: connecting, listing pods, server-side apply of
   a ConfigMap, the dynamic API, watchers, and reflectors. `crdgen` prints the CRD and
   `wpgen` prints a sample `Webpage`.
-- **A first controller** in `src/main.rs`. It watches `Webpage` resources, attaches a
-  finalizer, and logs each reconcile. It runs in-cluster or, outside a cluster, against a
-  kind context only.
+- **The controller** in `src/main.rs`. For each `Webpage` it server-side applies a ConfigMap
+  holding the HTML, an nginx Deployment, and a Service, all owned by the `Webpage` so they
+  are garbage-collected with it. It watches those children (filtered by a managed-by label)
+  and writes `status.readyReplicas` and `status.observedGeneration`. It runs in-cluster or,
+  outside a cluster, against a kind context only.
 
-Not done yet: the operator doesn't create the ConfigMap, Deployment, or Service, and doesn't
-write status (steps 10–14). Nothing from the production-readiness phase (steps 15–19) exists
-yet: no integration tests, metrics, RBAC, or operator Deployment manifests.
+Not done yet: status conditions, Events, finalizers, and related-resource watches (steps 11–14). Nothing from the
+production-readiness phase (steps 15–19) exists yet: no
+integration tests, metrics, RBAC, or operator Deployment manifests.
 
 To try the controller on kind:
 
@@ -46,18 +49,19 @@ make crd                                  # regenerate manifests/crd.json
 kubectl apply -f manifests/crd.json
 cargo run                                 # the operator
 cargo run --example wpgen | kubectl apply -f -
+kubectl get webpage,configmap,deployment,service   # the Webpage and its children
 ```
 
 ## Roadmap
 
-| Phase | Steps | What it covers |
-| ----- | ----- | -------------- |
-| 0. Foundations | 0–1 | Async Rust and Kubernetes basics, a local kind cluster, dependencies |
-| 1. Talking to the API server | 2–5 | Connecting, reading typed resources, server-side apply, the dynamic API |
-| 2. Watching for changes | 6–7 | Watchers, reflectors, and cached stores |
-| 3. Custom resources | 8 | The `Webpage` CRD, schema defaults, and CEL validation |
-| 4. Building the operator | 9–14 | The controller, child resources, status and conditions, errors and Events, finalizers, related resources |
-| 5. Production readiness | 15–19 | Testing, observability, packaging and RBAC, tuning, CI and supply chain |
+| Phase                        | Steps | What it covers                                                                                           |
+|------------------------------|-------|----------------------------------------------------------------------------------------------------------|
+| 0. Foundations               | 0–1   | Async Rust and Kubernetes basics, a local kind cluster, dependencies                                     |
+| 1. Talking to the API server | 2–5   | Connecting, reading typed resources, server-side apply, the dynamic API                                  |
+| 2. Watching for changes      | 6–7   | Watchers, reflectors, and cached stores                                                                  |
+| 3. Custom resources          | 8     | The `Webpage` CRD, schema defaults, and CEL validation                                                   |
+| 4. Building the operator     | 9–14  | The controller, child resources, status and conditions, errors and Events, finalizers, related resources |
+| 5. Production readiness      | 15–19 | Testing, observability, packaging and RBAC, tuning, CI and supply chain                                  |
 
 `LEARN.md` also has a **Ground rules** section: the Rust and operator practices every step is
 held to, such as typed errors, no `unwrap()` on cluster data, idempotent reconciles, and
@@ -80,7 +84,8 @@ kubectl config current-context        # must print kind-learn
 cargo build
 ```
 
-`make help` lists shortcuts for the common commands. Then start at step 0 of [`LEARN.md`](LEARN.md). Each exercise is an example you run with
+`make help` lists shortcuts for the common commands. Then start at step 0 of
+[`LEARN.md`](LEARN.md). Each exercise is an example you run with
 `cargo run --example <name>`, for instance `cargo run --example 03_list_pods`.
 
 > **Use a throwaway cluster.** kube-rs and `kubectl` both act on your kubeconfig's *current

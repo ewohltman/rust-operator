@@ -44,7 +44,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     8. Define a custom resource
 - [x] 
     9. First controller
-- [ ] 
+- [x] 
     10. Manage child resources
 - [ ] 
     11. Status and conditions

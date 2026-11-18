@@ -1,37 +1,20 @@
 use futures::StreamExt;
-use kube::api::ListParams;
+use k8s_openapi::NamespaceResourceScope;
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::{ConfigMap, Service};
+use kube::api::{ListParams, Patch};
 use kube::config::KubeConfigOptions;
-use kube::runtime::Controller;
+use kube::core::params;
 use kube::runtime::controller::Action;
-use kube::runtime::finalizer::{Event as FinalizerEvent, finalizer};
-use kube::runtime::watcher::Config;
-use kube::{Api, Client, ResourceExt};
-use rust_operator::{Webpage, kind_cluster_guard};
+use kube::runtime::{Controller, watcher};
+use kube::{Api, Client, Resource, ResourceExt};
+use rust_operator::{
+    Context, MANAGER, ReconcileError, ReconcileResult, Webpage, WebpageStatus, error_policy,
+    kind_cluster_guard,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
-
-// Define a unique DNS-style finalizer name
-const FINALIZER_NAME: &str = "demo.ephemeral-roles.net/cleanup";
-
-type ReconcileResult<T, E = ReconcileError> = Result<T, E>;
-
-/// Errors returned by this module.
-#[derive(thiserror::Error, Debug)]
-enum ReconcileError {
-    #[error(transparent)]
-    Api(#[from] kube::Error),
-
-    #[error("namespace not set")]
-    EmptyNamespace,
-
-    #[error("finalizer error: {0}")]
-    FinalizerError(String),
-}
-
-struct Context {
-    client: Client,
-}
 
 #[tracing::instrument(skip(wp, ctx))]
 async fn reconcile(wp: Arc<Webpage>, ctx: Arc<Context>) -> ReconcileResult<Action> {
@@ -39,51 +22,118 @@ async fn reconcile(wp: Arc<Webpage>, ctx: Arc<Context>) -> ReconcileResult<Actio
         return Err(ReconcileError::EmptyNamespace);
     };
 
-    let api: Api<Webpage> = Api::namespaced(ctx.client.clone(), &namespace);
+    let controller_ref = wp
+        .controller_owner_ref(&())
+        .ok_or(ReconcileError::EmptyControllerOwnerReference)?;
 
-    finalizer(&api, FINALIZER_NAME, wp, |event| async {
-        match event {
-            FinalizerEvent::Apply(resource) => apply(&resource, ctx.clone()),
-            FinalizerEvent::Cleanup(resource) => cleanup(&resource, ctx.clone()),
-        }
+    let name = wp.name_any();
+    let params = params::PatchParams::apply(MANAGER).force();
+
+    info!(%namespace, %name, "apply");
+
+    let cm = rust_operator::desired_config_map(&wp, &namespace, &name, &controller_ref);
+    let dep = rust_operator::desired_deployment(&wp, &namespace, &name, &controller_ref);
+    let service = rust_operator::desired_service(&namespace, &name, &controller_ref);
+
+    let (res_cm, res_dep, res_service) = tokio::join!(
+        apply(&namespace, &name, &params, cm, &ctx),
+        apply(&namespace, &name, &params, dep, &ctx),
+        apply(&namespace, &name, &params, service, &ctx),
+    );
+
+    res_cm?;
+    res_dep?;
+    res_service?;
+
+    info!(%namespace, %name, "apply status");
+
+    let actual_status = actual_status(&wp, &namespace, &name, &ctx).await?;
+    apply_status::<Webpage>(
+        &ctx,
+        &namespace,
+        &name,
+        &params,
+        serde_json::to_value(&actual_status)?,
+    )
+    .await?;
+
+    info!(%namespace, %name, "success");
+
+    if actual_status == rust_operator::desired_status(&wp) {
+        Ok(Action::requeue(Duration::from_secs(300)))
+    } else {
+        Ok(Action::await_change())
+    }
+}
+
+async fn actual_status(
+    wp: &Webpage,
+    namespace: &str,
+    name: &str,
+    ctx: &Arc<Context>,
+) -> Result<WebpageStatus, ReconcileError> {
+    Ok(WebpageStatus {
+        ready_replicas: Api::<Deployment>::namespaced(ctx.client.clone(), namespace)
+            .get(name)
+            .await?
+            .status
+            .unwrap_or_default()
+            .ready_replicas
+            .unwrap_or_default(),
+        observed_generation: wp.metadata.generation,
     })
-    .await
-    .map_err(|e| ReconcileError::FinalizerError(e.to_string()))
 }
 
-#[tracing::instrument(skip(wp, _ctx))]
-fn apply(wp: &Arc<Webpage>, _ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    // 1. Reconcile your normal state here
-    // The finalizer is already attached to `wp`
-    let Some(namespace) = wp.namespace() else {
-        return Err(ReconcileError::EmptyNamespace);
-    };
-    let name = wp.name_any();
+#[tracing::instrument(skip(ctx, params, k))]
+async fn apply<K>(
+    namespace: &str,
+    name: &str,
+    params: &params::PatchParams,
+    k: K,
+    ctx: &Arc<Context>,
+) -> Result<(), ReconcileError>
+where
+    K: std::fmt::Debug,
+    K: std::clone::Clone,
+    K: Resource<Scope = NamespaceResourceScope>
+        + k8s_openapi::serde::Serialize
+        + serde::de::DeserializeOwned,
+    <K as kube::Resource>::DynamicType: std::default::Default,
+{
+    let dynamic_resource = <K as Resource>::DynamicType::default();
+    let kind = K::kind(&dynamic_resource);
+    info!(%namespace, %name, kind = kind.to_string(), "apply");
 
-    info!(%namespace, %name, "success");
-
-    Ok(Action::requeue(Duration::from_secs(300)))
+    let api: Api<K> = Api::namespaced(ctx.client.clone(), namespace);
+    api.patch(name, params, &Patch::Apply(k)).await?;
+    Ok(())
 }
 
-#[tracing::instrument(skip(wp, _ctx))]
-fn cleanup(wp: &Arc<Webpage>, _ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    // 2. Clean up external resources
-    // Must be idempotent in case cleanup fails partway and retries
-    let Some(namespace) = wp.namespace() else {
-        return Err(ReconcileError::EmptyNamespace);
-    };
-    let name = wp.name_any();
+#[tracing::instrument(skip(ctx, params, status))]
+async fn apply_status<K>(
+    ctx: &Arc<Context>,
+    namespace: &str,
+    name: &str,
+    params: &params::PatchParams,
+    status: serde_json::Value,
+) -> Result<(), ReconcileError>
+where
+    K: std::fmt::Debug,
+    K: std::clone::Clone,
+    K: Resource<Scope = NamespaceResourceScope>
+        + k8s_openapi::serde::Serialize
+        + serde::de::DeserializeOwned,
+    <K as kube::Resource>::DynamicType: std::default::Default,
+{
+    let api: Api<K> = Api::namespaced(ctx.client.clone(), namespace);
+    let data = serde_json::json!({
+    "apiVersion": K::api_version(&<K as Resource>::DynamicType::default()),
+    "kind":K::kind(&<K as Resource>::DynamicType::default()),
+    "status": status,
+    });
 
-    info!(%namespace, %name, "success");
-
-    // Returning Ok removes the finalizer and allows K8s to delete the resource
-    Ok(Action::await_change())
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tracing::instrument(skip(_wp, _ctx))]
-fn error_policy(_wp: Arc<Webpage>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
-    Action::requeue(Duration::from_secs(5))
+    api.patch_status(name, params, &Patch::Apply(data)).await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -118,8 +168,16 @@ async fn main() -> anyhow::Result<()> {
         Err(err) => return Err(anyhow::anyhow!(err)),
     }
 
-    Controller::new(api, Config::default())
+    let config = watcher::Config {
+        label_selector: Some(rust_operator::managed_by_label_selector()),
+        ..Default::default()
+    };
+
+    Controller::new(api, watcher::Config::default())
         .shutdown_on_signal()
+        .owns(Api::<ConfigMap>::all(client.clone()), config.clone())
+        .owns(Api::<Deployment>::all(client.clone()), config.clone())
+        .owns(Api::<Service>::all(client.clone()), config)
         .run(reconcile, error_policy, Arc::new(Context { client }))
         .for_each(|result| {
             match result {
