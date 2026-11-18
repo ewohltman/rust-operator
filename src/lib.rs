@@ -1,8 +1,57 @@
-use kube::CustomResource;
-use kube::KubeSchema;
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, PodSpec, PodTemplateSpec, Service,
+    ServicePort, ServiceSpec, Volume, VolumeMount,
+};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
 use kube::config;
+use kube::runtime::controller::Action;
+use kube::{Client, CustomResource};
+use kube::{KubeSchema, Resource};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
+
+/// A static web page served by nginx.
+#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Eq, PartialEq)]
+#[kube(
+    group = "demo.ephemeral-roles.net",
+    version = "v1alpha1",
+    kind = "Webpage",
+    namespaced
+)]
+#[kube(status = "WebpageStatus", shortname = "wp", doc = "An HTML webpage.")]
+#[serde(rename_all = "camelCase")]
+pub struct WebpageSpec {
+    /// The HTML document to serve as `index.html`.
+    #[schemars(length(max = 102_400))]
+    #[x_kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document")
+    )]
+    pub html: String,
+    /// How many nginx pods to run at the same time.
+    #[serde(default = "default_replicas")]
+    #[schemars(range(min = 0, max = 10))]
+    pub replicas: i32,
+}
+
+fn default_replicas() -> i32 {
+    1
+}
+
+/// Observed state of a `Webpage`, written only by the operator.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, KubeSchema, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebpageStatus {
+    /// Ready pods, as reported by the Deployment.
+    pub ready_replicas: i32,
+    /// The `metadata.generation` this status was computed from.
+    pub observed_generation: Option<i64>,
+}
+
+/// Defines a Result type for this module.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Errors returned by this module.
 #[derive(thiserror::Error, Debug)]
@@ -20,8 +69,57 @@ pub enum Error {
     CurrentContextNotKind(String),
 }
 
-/// Defines a Result type for this module.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
+/// Define a unique DNS-style finalizer name.
+pub const FINALIZER_NAME: &str = "demo.ephemeral-roles.net/finalizer";
+
+pub const NAME_LABEL: &str = "app.kubernetes.io/name";
+
+pub const INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
+
+pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+
+pub const MANAGER: &str = "rust-operator";
+
+pub type ReconcileResult<T, E = ReconcileError> = std::result::Result<T, E>;
+
+/// Errors returned by this module.
+#[derive(thiserror::Error, Debug)]
+pub enum ReconcileError {
+    #[error("namespace not set")]
+    EmptyNamespace,
+
+    #[error("controller owner reference not set")]
+    EmptyControllerOwnerReference,
+
+    #[error(transparent)]
+    Api(#[from] kube::Error),
+
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
+}
+
+pub struct Context {
+    pub client: Client,
+}
+
+/// Sets global tracing subscriber with defaults.
+///
+/// # Errors
+///
+/// Returns an `Err` if the global tracing subscriber could not be set.
+pub fn init_tracing_default() -> Result<()> {
+    init_tracing(new_default_tracing_subscriber())
+}
+
+#[must_use]
+pub fn managed_by_label_selector() -> String {
+    format!("{MANAGED_BY_LABEL}={MANAGER}")
+}
+
+#[tracing::instrument(skip(_wp, _ctx))]
+pub fn error_policy(_wp: Arc<Webpage>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+    Action::requeue(Duration::from_secs(5))
+}
 
 /// Returns a Kube config if current context is set to a kind cluster.
 ///
@@ -44,13 +142,205 @@ pub fn kind_cluster_guard() -> Result<config::Kubeconfig> {
     }
 }
 
-/// Sets global tracing subscriber with defaults.
-///
-/// # Errors
-///
-/// Returns an `Err` if the global tracing subscriber could not be set.
-pub fn init_tracing_default() -> Result<()> {
-    init_tracing(new_default_tracing_subscriber())
+#[must_use]
+pub fn desired_object_meta(
+    namespace: &str,
+    name: &str,
+    controller_ref: &OwnerReference,
+) -> ObjectMeta {
+    ObjectMeta {
+        namespace: Some(namespace.to_string()),
+        name: Some(name.to_string()),
+        labels: Some(match_labels(name)),
+        owner_references: Some(vec![controller_ref.clone()]),
+        ..Default::default()
+    }
+}
+
+const INDEX_FILE: &str = "index.html";
+
+#[must_use]
+pub fn desired_config_map(
+    wp: &Webpage,
+    namespace: &str,
+    name: &str,
+    controller_ref: &OwnerReference,
+) -> ConfigMap {
+    ConfigMap {
+        metadata: desired_object_meta(namespace, name, controller_ref),
+        data: Some(BTreeMap::from([(
+            INDEX_FILE.to_string(),
+            wp.spec.html.clone(),
+        )])),
+        ..Default::default()
+    }
+}
+
+#[must_use]
+pub fn desired_deployment(
+    wp: &Webpage,
+    namespace: &str,
+    name: &str,
+    controller_ref: &OwnerReference,
+) -> Deployment {
+    Deployment {
+        metadata: desired_object_meta(namespace, name, controller_ref),
+        spec: DeploymentSpec {
+            replicas: Some(wp.spec.replicas),
+            selector: LabelSelector {
+                match_labels: Some(match_labels(name)),
+                match_expressions: None,
+            },
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(match_labels(name).clone()),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: name.to_string(),
+                        image: Some("nginx".to_string()),
+                        ports: Some(vec![ContainerPort {
+                            name: Some(PORT_NAME.to_string()),
+                            container_port: PORT_NUMBER,
+                            ..Default::default()
+                        }]),
+                        volume_mounts: Some(vec![VolumeMount {
+                            name: name.to_string(),
+                            mount_path: DEFAULT_FILE_LOCATION.to_string(),
+                            read_only: Some(true),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }],
+                    volumes: Some(vec![Volume {
+                        name: name.to_string(),
+                        config_map: Some(ConfigMapVolumeSource {
+                            name: name.to_string(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+const DEFAULT_FILE_LOCATION: &str = "/usr/share/nginx/html";
+
+#[must_use]
+pub fn desired_service(namespace: &str, name: &str, controller_ref: &OwnerReference) -> Service {
+    Service {
+        metadata: desired_object_meta(namespace, name, controller_ref),
+        spec: Some(ServiceSpec {
+            selector: Some(match_labels(name)),
+            ports: Some(vec![ServicePort {
+                name: Some(PORT_NAME.to_string()),
+                port: PORT_NUMBER,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[must_use]
+pub fn desired_status(wp: &Webpage) -> WebpageStatus {
+    WebpageStatus {
+        observed_generation: wp.metadata.generation,
+        ready_replicas: wp.spec.replicas,
+    }
+}
+
+const PORT_NAME: &str = "http";
+const PORT_NUMBER: i32 = 80;
+
+#[cfg(test)]
+mod desired_tests {
+    use super::*;
+
+    const NAME: &str = "test-name";
+    const NAMESPACE: &str = "test-ns";
+    const UID: &str = "test-uid";
+    const EXPECTED_HTML: &str = "<!doctype html><html></html>";
+    const EXPECTED_REPLICAS: i32 = 2;
+
+    #[test]
+    fn test_desired_object_meta() {
+        let (_, controller_ref) = new_webpage_controller_ref();
+        let om = desired_object_meta(NAMESPACE, NAME, &controller_ref);
+        assert_eq!(om.namespace.unwrap(), NAMESPACE);
+        assert_eq!(om.name.unwrap(), NAME);
+        assert_eq!(om.labels.unwrap(), match_labels(NAME));
+        assert_eq!(om.owner_references.unwrap(), vec![controller_ref]);
+    }
+
+    #[test]
+    fn test_desired_config_map() {
+        let (wp, controller_ref) = new_webpage_controller_ref();
+        let cm = desired_config_map(&wp, NAMESPACE, NAME, &controller_ref);
+        assert_eq!(cm.data.unwrap().get(INDEX_FILE).unwrap(), EXPECTED_HTML);
+    }
+
+    #[test]
+    fn test_desired_deployment() {
+        let (wp, controller_ref) = new_webpage_controller_ref();
+        let dep = desired_deployment(&wp, NAMESPACE, NAME, &controller_ref);
+        assert_eq!(dep.spec.replicas.unwrap(), EXPECTED_REPLICAS);
+    }
+
+    #[test]
+    fn test_desired_service() {
+        let (wp, controller_ref) = new_webpage_controller_ref();
+        let service = desired_service(NAMESPACE, NAME, &controller_ref);
+
+        let spec = service.spec.unwrap();
+        let selector = spec.selector.unwrap();
+
+        let dep = desired_deployment(&wp, NAMESPACE, NAME, &controller_ref);
+        let pod_labels = dep.spec.template.metadata.unwrap().labels.unwrap();
+
+        assert_eq!(selector, pod_labels);
+
+        let service_ports = spec.ports.unwrap();
+        assert_eq!(service_ports.len(), 1);
+
+        let service_port = service_ports.into_iter().next().unwrap();
+        assert_eq!(service_port.name.unwrap(), PORT_NAME);
+        assert_eq!(service_port.port, PORT_NUMBER);
+    }
+
+    #[test]
+    fn test_desired_status() {
+        let (wp, _) = new_webpage_controller_ref();
+
+        let status = desired_status(&wp);
+        assert_eq!(status.ready_replicas, wp.spec.replicas);
+        assert_eq!(status.observed_generation, wp.metadata.generation);
+    }
+
+    fn new_webpage_controller_ref() -> (Webpage, OwnerReference) {
+        let mut wp = Webpage::new(
+            NAME,
+            WebpageSpec {
+                html: EXPECTED_HTML.to_string(),
+                replicas: EXPECTED_REPLICAS,
+            },
+        );
+        wp.metadata.uid = Some(UID.to_string());
+
+        let controller_ref = wp
+            .controller_owner_ref(&())
+            .ok_or(ReconcileError::EmptyControllerOwnerReference)
+            .unwrap();
+
+        (wp, controller_ref)
+    }
 }
 
 /// Sets global tracing subscriber with the given subscriber.
@@ -70,45 +360,25 @@ where
 fn new_default_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync + 'static {
     tracing_subscriber::fmt()
         .compact()
+        .with_file(true)
+        .with_line_number(true)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .finish()
 }
 
-/// A static web page served by nginx.
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Eq, PartialEq)]
-#[kube(
-    group = "demo.ephemeral-roles.net",
-    version = "v1alpha1",
-    kind = "Webpage",
-    namespaced
-)]
-#[kube(status = "WebpageStatus", shortname = "wp", doc = "An HTML webpage.")]
-#[serde(rename_all = "camelCase")]
-pub struct WebpageSpec {
-    /// The HTML document to serve as `index.html`.
-    #[schemars(length(max = 102_400))]
-    #[x_kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document"))]
-    pub html: String,
-    /// How many nginx pods to run at the same time.
-    #[serde(default = "default_replicas")]
-    #[schemars(range(min = 0, max = 10))]
-    pub replicas: i32,
-}
-
-/// Observed state of a `Webpage`, written only by the operator.
-#[derive(Deserialize, Serialize, Clone, Debug, Default, KubeSchema, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WebpageStatus {
-    /// Ready pods, as reported by the Deployment.
-    pub ready_replicas: i32,
-    /// The `metadata.generation` this status was computed from.
-    pub observed_generation: Option<i64>,
-}
-
-fn default_replicas() -> i32 {
-    1
+#[must_use]
+fn match_labels(name: &str) -> BTreeMap<String, String> {
+    let kind = Webpage::kind(&());
+    BTreeMap::from([
+        (NAME_LABEL.to_string(), kind.to_ascii_lowercase()),
+        (
+            INSTANCE_LABEL.to_string(),
+            format!("{}-{name}", kind.to_ascii_lowercase()),
+        ),
+        (MANAGED_BY_LABEL.to_string(), MANAGER.to_string()),
+    ])
 }
 
 #[cfg(test)]
