@@ -27,7 +27,7 @@ clippy: fmt ## Run Clippy and fail on any warnings
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 test: ## Run all unit and integration tests
-	$(CARGO) test --all-features
+	$(CARGO) llvm-cov --all-features
 
 doc: ## Build and open project documentation
 	$(CARGO) doc --no-deps --open

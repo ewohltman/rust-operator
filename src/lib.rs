@@ -2,16 +2,18 @@ use gateway_api::httproutes::{
     HttpRoute, HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs,
     HttpRouteRulesMatches, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType, HttpRouteSpec,
 };
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, DeploymentStatus};
 use k8s_openapi::api::core::v1::{
     ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, Namespace, NamespaceSpec, PodSpec,
     PodTemplateSpec, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
-use kube::config;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+    Condition, LabelSelector, ObjectMeta, OwnerReference, Time,
+};
 use kube::runtime::controller::Action;
-use kube::{Client, CustomResource};
-use kube::{KubeSchema, Resource};
+use kube::{Client, CustomResource, Resource};
+use kube::{ResourceExt, config};
+use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,19 +21,31 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 /// A static web page served by nginx.
-#[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Eq, PartialEq)]
+#[derive(
+    CustomResource, Serialize, Deserialize, Default, Debug, PartialEq, Eq, Clone, JsonSchema,
+)]
 #[kube(
     group = "demo.ephemeral-roles.net",
     version = "v1alpha1",
     kind = "Webpage",
-    namespaced
+    namespaced,
+    doc = "An HTML webpage.",
+    status = "WebpageStatus",
+    shortname = "wp",
+    derive = "PartialEq",
+    derive = "Default",
+    printcolumn(
+        name = "Ready",
+        type_ = "string",
+        json_path = r#".status.conditions[?(@.type=="Ready")].status"#,
+        description = "Whether the resource is ready",
+    )
 )]
-#[kube(status = "WebpageStatus", shortname = "wp", doc = "An HTML webpage.")]
 #[serde(rename_all = "camelCase")]
 pub struct WebpageSpec {
     /// The HTML document to serve as `index.html`.
     #[schemars(length(max = 102_400))]
-    #[x_kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document")
+    #[kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document")
     )]
     pub html: String,
     /// How many nginx pods to run at the same time.
@@ -45,13 +59,43 @@ fn default_replicas() -> i32 {
 }
 
 /// Observed state of a `Webpage`, written only by the operator.
-#[derive(Deserialize, Serialize, Clone, Debug, Default, KubeSchema, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WebpageStatus {
     /// Ready pods, as reported by the Deployment.
     pub ready_replicas: i32,
     /// The `metadata.generation` this status was computed from.
     pub observed_generation: Option<i64>,
+    /// Represents the latest available observations of a webpage's current state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "conditions")]
+    pub conditions: Vec<Condition>,
+}
+
+fn conditions(_: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+    json_schema!({
+        "type": "array",
+        "x-kubernetes-list-type": "map",
+        "x-kubernetes-list-map-keys": ["type"],
+        "items": {
+            "type": "object",
+            "properties": {
+                "lastTransitionTime": { "format": "date-time", "type": "string" },
+                "message": { "type": "string" },
+                "observedGeneration": { "type": "integer", "format": "int64", "default": 0 },
+                "reason": { "type": "string" },
+                "status": { "type": "string" },
+                "type": { "type": "string" }
+            },
+            "required": [
+                "lastTransitionTime",
+                "message",
+                "reason",
+                "status",
+                "type"
+            ],
+        },
+    })
 }
 
 /// Defines a Result type for this module.
@@ -61,7 +105,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    TracingSetup(#[from] tracing::subscriber::SetGlobalDefaultError),
+    TracingSetup(Box<dyn std::error::Error + Send + Sync>),
 
     #[error(transparent)]
     Read(#[from] config::KubeconfigError),
@@ -114,8 +158,24 @@ pub struct Context {
 /// # Errors
 ///
 /// Returns an `Err` if the global tracing subscriber could not be set.
-pub fn init_tracing_default() -> Result<()> {
-    init_tracing(new_default_tracing_subscriber())
+pub fn init_tracing_default(json: bool) -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    if json {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .flatten_event(true)
+            .try_init()
+            .map_err(Error::TracingSetup)
+    } else {
+        tracing_subscriber::fmt()
+            .compact()
+            .with_env_filter(filter)
+            .with_file(true)
+            .with_line_number(true)
+            .try_init()
+            .map_err(Error::TracingSetup)
+    }
 }
 
 #[must_use]
@@ -154,8 +214,8 @@ const WP_NAMESPACE_PREFIX: &str = "wp";
 const PUBLIC_GATEWAY_LABEL: &str = "ephemeral-roles.net/public-gateway";
 
 #[must_use]
-pub fn desired_namespace(name: &str, controller_ref: &OwnerReference) -> Namespace {
-    let mut labels = match_labels(name);
+pub fn new_namespace(name: &str, controller_ref: &OwnerReference) -> Namespace {
+    let mut labels = new_match_labels(name);
     labels.insert(PUBLIC_GATEWAY_LABEL.to_string(), "true".to_string());
     labels.insert("linkerd.io/inject".to_string(), "enabled".to_string());
 
@@ -172,10 +232,10 @@ pub fn desired_namespace(name: &str, controller_ref: &OwnerReference) -> Namespa
 }
 
 #[must_use]
-pub fn desired_object_meta(name: &str, controller_ref: &OwnerReference) -> ObjectMeta {
+pub fn new_object_meta(name: &str, controller_ref: &OwnerReference) -> ObjectMeta {
     ObjectMeta {
         name: Some(name.to_string()),
-        labels: Some(match_labels(name)),
+        labels: Some(new_match_labels(name)),
         owner_references: Some(vec![controller_ref.clone()]),
         ..Default::default()
     }
@@ -184,9 +244,9 @@ pub fn desired_object_meta(name: &str, controller_ref: &OwnerReference) -> Objec
 const INDEX_FILE: &str = "index.html";
 
 #[must_use]
-pub fn desired_config_map(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> ConfigMap {
+pub fn new_config_map(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> ConfigMap {
     ConfigMap {
-        metadata: desired_object_meta(name, controller_ref),
+        metadata: new_object_meta(name, controller_ref),
         data: Some(BTreeMap::from([(
             INDEX_FILE.to_string(),
             wp.spec.html.clone(),
@@ -195,19 +255,22 @@ pub fn desired_config_map(wp: &Webpage, name: &str, controller_ref: &OwnerRefere
     }
 }
 
+const PORT_NAME: &str = "http";
+const PORT_NUMBER: i32 = 80;
+
 #[must_use]
-pub fn desired_deployment(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> Deployment {
+pub fn new_deployment(wp: &Webpage, name: &str, controller_ref: &OwnerReference) -> Deployment {
     Deployment {
-        metadata: desired_object_meta(name, controller_ref),
+        metadata: new_object_meta(name, controller_ref),
         spec: DeploymentSpec {
             replicas: Some(wp.spec.replicas),
             selector: LabelSelector {
-                match_labels: Some(match_labels(name)),
+                match_labels: Some(new_match_labels(name)),
                 match_expressions: None,
             },
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(match_labels(name).clone()),
+                    labels: Some(new_match_labels(name).clone()),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -247,11 +310,11 @@ pub fn desired_deployment(wp: &Webpage, name: &str, controller_ref: &OwnerRefere
 const DEFAULT_FILE_LOCATION: &str = "/usr/share/nginx/html";
 
 #[must_use]
-pub fn desired_service(name: &str, controller_ref: &OwnerReference) -> Service {
+pub fn new_service(name: &str, controller_ref: &OwnerReference) -> Service {
     Service {
-        metadata: desired_object_meta(name, controller_ref),
+        metadata: new_object_meta(name, controller_ref),
         spec: Some(ServiceSpec {
-            selector: Some(match_labels(name)),
+            selector: Some(new_match_labels(name)),
             ports: Some(vec![ServicePort {
                 name: Some(PORT_NAME.to_string()),
                 port: PORT_NUMBER,
@@ -264,7 +327,7 @@ pub fn desired_service(name: &str, controller_ref: &OwnerReference) -> Service {
 }
 
 #[must_use]
-pub fn desired_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRoute {
+pub fn new_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRoute {
     let parent_ref = HttpRouteParentRefs {
         name: "public".to_string(),
         namespace: Some("envoy-gateway-system".to_string()),
@@ -294,7 +357,7 @@ pub fn desired_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRo
     };
 
     HttpRoute {
-        metadata: desired_object_meta(name, controller_ref),
+        metadata: new_object_meta(name, controller_ref),
         spec: HttpRouteSpec {
             hostnames: Some(vec![format!("{name}.ephemeral-roles.net")]),
             parent_refs: Some(vec![parent_ref]),
@@ -304,31 +367,98 @@ pub fn desired_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRo
     }
 }
 
+const CONDITION_STATUS_UNKNOWN: &str = "Unknown";
+const CONDITION_STATUS_TRUE: &str = "True";
+const CONDITION_STATUS_FALSE: &str = "False";
+const CONDITION_REASON_WAITING: &str = "Waiting";
+const CONDITION_REASON_PROGRESSING: &str = "Progressing";
+const CONDITION_REASON_READY: &str = "Ready";
+const CONDITION_TYPE: &str = "Ready";
+
 #[must_use]
-pub fn desired_status(wp: &Webpage) -> WebpageStatus {
+pub fn new_status(
+    wp: &Webpage,
+    wp_status: &WebpageStatus,
+    dep_status: &DeploymentStatus,
+) -> WebpageStatus {
+    let old = wp_status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == CONDITION_TYPE);
+
     WebpageStatus {
+        ready_replicas: dep_status.ready_replicas.unwrap_or_default(),
         observed_generation: wp.metadata.generation,
-        ready_replicas: wp.spec.replicas,
+        conditions: vec![new_condition(wp, dep_status, old)],
     }
 }
 
-const PORT_NAME: &str = "http";
-const PORT_NUMBER: i32 = 80;
+fn new_condition(
+    wp: &Webpage,
+    dep_status: &DeploymentStatus,
+    old: Option<&Condition>,
+) -> Condition {
+    let (status, reason) = match (
+        dep_status.observed_generation,
+        dep_status.ready_replicas.unwrap_or(0),
+    ) {
+        (None, _) => (CONDITION_STATUS_UNKNOWN, CONDITION_REASON_WAITING),
+        (_, r) if r == wp.spec.replicas => (CONDITION_STATUS_TRUE, CONDITION_REASON_READY),
+        _ => (CONDITION_STATUS_FALSE, CONDITION_REASON_PROGRESSING),
+    };
+
+    Condition {
+        // only move the timestamp when status flips
+        last_transition_time: old.filter(|c| c.status == status).map_or_else(
+            || Time(k8s_openapi::jiff::Timestamp::now()),
+            |c| c.last_transition_time.clone(),
+        ),
+        observed_generation: wp.metadata.generation,
+        message: format!("https://{}.ephemeral-roles.net", wp.name_any()),
+        reason: reason.to_string(),
+        status: status.to_string(),
+        type_: CONDITION_TYPE.to_string(),
+    }
+}
+
+#[must_use]
+fn new_match_labels(name: &str) -> BTreeMap<String, String> {
+    let kind = Webpage::kind(&());
+    BTreeMap::from([
+        (NAME_LABEL.to_string(), kind.to_ascii_lowercase()),
+        (
+            INSTANCE_LABEL.to_string(),
+            format!("{}-{name}", kind.to_ascii_lowercase()),
+        ),
+        (MANAGED_BY_LABEL.to_string(), MANAGER.to_string()),
+    ])
+}
 
 #[cfg(test)]
-mod desired_tests {
+mod tests {
     use super::*;
+    use kube::{CustomResourceExt, Resource};
 
     const NAME: &str = "test-name";
     const EXPECTED_NAMESPACE: &str = const_format::concatcp!(WP_NAMESPACE_PREFIX, "-", NAME);
     const UID: &str = "test-uid";
     const EXPECTED_HTML: &str = "<!doctype html><html></html>";
     const EXPECTED_REPLICAS: i32 = 2;
+    const GENERATION: i64 = 3;
+
+    #[test]
+    fn test_crd_spec_change() {
+        let new = serde_json::to_value(Webpage::crd()).unwrap();
+        let current: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open("manifests/crd.json").unwrap()).unwrap();
+
+        pretty_assertions::assert_eq!(new, current, "crd changed. run `make crd` to regenerate.");
+    }
 
     #[test]
     fn test_desired_namespace() {
         let (_, controller_ref) = new_webpage_controller_ref();
-        let namespace = desired_namespace(NAME, &controller_ref);
+        let namespace = new_namespace(NAME, &controller_ref);
         assert_eq!(namespace.metadata.name.unwrap(), EXPECTED_NAMESPACE);
 
         let labels = namespace.metadata.labels.unwrap();
@@ -341,9 +471,9 @@ mod desired_tests {
     fn test_desired_object_meta() {
         let (_, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
-        let om = desired_object_meta(NAME, &owner_ref);
+        let om = new_object_meta(NAME, &owner_ref);
         assert_eq!(om.name.unwrap(), NAME);
-        assert_eq!(om.labels.unwrap(), match_labels(NAME));
+        assert_eq!(om.labels.unwrap(), new_match_labels(NAME));
         assert_eq!(om.owner_references.unwrap(), vec![owner_ref]);
     }
 
@@ -351,7 +481,7 @@ mod desired_tests {
     fn test_desired_config_map() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
-        let cm = desired_config_map(&wp, NAME, &owner_ref);
+        let cm = new_config_map(&wp, NAME, &owner_ref);
         assert_eq!(cm.data.unwrap().get(INDEX_FILE).unwrap(), EXPECTED_HTML);
     }
 
@@ -359,7 +489,7 @@ mod desired_tests {
     fn test_desired_deployment() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
-        let dep = desired_deployment(&wp, NAME, &owner_ref);
+        let dep = new_deployment(&wp, NAME, &owner_ref);
         assert_eq!(dep.spec.replicas.unwrap(), EXPECTED_REPLICAS);
     }
 
@@ -367,12 +497,12 @@ mod desired_tests {
     fn test_desired_service() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
-        let service = desired_service(NAME, &owner_ref);
+        let service = new_service(NAME, &owner_ref);
 
         let spec = service.spec.unwrap();
         let selector = spec.selector.unwrap();
 
-        let dep = desired_deployment(&wp, NAME, &controller_ref);
+        let dep = new_deployment(&wp, NAME, &controller_ref);
         let pod_labels = dep.spec.template.metadata.unwrap().labels.unwrap();
 
         assert_eq!(selector, pod_labels);
@@ -386,20 +516,11 @@ mod desired_tests {
     }
 
     #[test]
-    fn test_desired_status() {
-        let (wp, _) = new_webpage_controller_ref();
-
-        let status = desired_status(&wp);
-        assert_eq!(status.ready_replicas, wp.spec.replicas);
-        assert_eq!(status.observed_generation, wp.metadata.generation);
-    }
-
-    #[test]
     fn test_desired_http_route() {
         let (_, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
 
-        let http_route = desired_http_route(NAME, &owner_ref);
+        let http_route = new_http_route(NAME, &owner_ref);
         assert_eq!(http_route.metadata.name.unwrap(), NAME);
 
         let spec = http_route.spec;
@@ -443,6 +564,98 @@ mod desired_tests {
         assert_eq!(backend_ref.port.unwrap(), PORT_NUMBER);
     }
 
+    #[test]
+    fn test_new_status() {
+        let (mut wp, _) = new_webpage_controller_ref();
+        wp.metadata.generation = Some(GENERATION);
+        let dep_status = new_deployment_status(Some(1), Some(EXPECTED_REPLICAS));
+
+        let status = new_status(&wp, &WebpageStatus::default(), &dep_status);
+        assert_eq!(status.ready_replicas, EXPECTED_REPLICAS);
+        assert_eq!(status.observed_generation, Some(GENERATION));
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, CONDITION_TYPE);
+        assert_eq!(status.conditions[0].status, CONDITION_STATUS_TRUE);
+    }
+
+    #[test]
+    fn test_new_condition() {
+        let (mut wp, _) = new_webpage_controller_ref();
+        wp.metadata.generation = Some(GENERATION);
+
+        let cases = [
+            (
+                None,
+                None,
+                CONDITION_STATUS_UNKNOWN,
+                CONDITION_REASON_WAITING,
+            ),
+            (
+                Some(1),
+                Some(EXPECTED_REPLICAS),
+                CONDITION_STATUS_TRUE,
+                CONDITION_REASON_READY,
+            ),
+            (
+                Some(1),
+                Some(1),
+                CONDITION_STATUS_FALSE,
+                CONDITION_REASON_PROGRESSING,
+            ),
+            (
+                Some(1),
+                None,
+                CONDITION_STATUS_FALSE,
+                CONDITION_REASON_PROGRESSING,
+            ),
+        ];
+        for (observed_generation, ready_replicas, status, reason) in cases {
+            let dep_status = new_deployment_status(observed_generation, ready_replicas);
+            let condition = new_condition(&wp, &dep_status, None);
+            assert_eq!(condition.status, status);
+            assert_eq!(condition.reason, reason);
+            assert_eq!(condition.type_, CONDITION_TYPE);
+            assert_eq!(condition.observed_generation, Some(GENERATION));
+            assert_eq!(
+                condition.message,
+                format!("https://{NAME}.ephemeral-roles.net")
+            );
+        }
+
+        // the transition time is kept while the status is unchanged and moves when it flips
+        let old_time = Time(k8s_openapi::jiff::Timestamp::UNIX_EPOCH);
+        let old = new_condition(
+            &wp,
+            &new_deployment_status(Some(1), Some(EXPECTED_REPLICAS)),
+            None,
+        );
+        let old = Condition {
+            last_transition_time: old_time.clone(),
+            ..old
+        };
+
+        let same = new_condition(
+            &wp,
+            &new_deployment_status(Some(1), Some(EXPECTED_REPLICAS)),
+            Some(&old),
+        );
+        assert_eq!(same.last_transition_time, old_time);
+
+        let flipped = new_condition(&wp, &new_deployment_status(Some(1), Some(1)), Some(&old));
+        assert_ne!(flipped.last_transition_time, old_time);
+    }
+
+    fn new_deployment_status(
+        observed_generation: Option<i64>,
+        ready_replicas: Option<i32>,
+    ) -> DeploymentStatus {
+        DeploymentStatus {
+            observed_generation,
+            ready_replicas,
+            ..Default::default()
+        }
+    }
+
     fn new_webpage_controller_ref() -> (Webpage, OwnerReference) {
         let mut wp = Webpage::new(
             NAME,
@@ -465,7 +678,7 @@ mod desired_tests {
         name: &str,
         controller_ref: &OwnerReference,
     ) -> (Namespace, OwnerReference) {
-        let mut ns = desired_namespace(name, controller_ref);
+        let mut ns = new_namespace(name, controller_ref);
         ns.metadata.uid = Some(UID.to_string());
 
         (
@@ -474,58 +687,5 @@ mod desired_tests {
                 .ok_or(ReconcileError::EmptyControllerOwnerReference)
                 .unwrap_or_default(),
         )
-    }
-}
-
-/// Sets global tracing subscriber with the given subscriber.
-///
-/// # Errors
-///
-/// Returns an `Err` if the global tracing subscriber could not be set.
-fn init_tracing<S>(subscriber: S) -> Result<()>
-where
-    S: tracing::Subscriber + Send + Sync + 'static,
-{
-    Ok(tracing::subscriber::set_global_default(subscriber)?)
-}
-
-/// Returns a new tracing subscriber with standardized config.
-#[must_use]
-fn new_default_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync + 'static {
-    tracing_subscriber::fmt()
-        .compact()
-        .with_file(true)
-        .with_line_number(true)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .finish()
-}
-
-#[must_use]
-fn match_labels(name: &str) -> BTreeMap<String, String> {
-    let kind = Webpage::kind(&());
-    BTreeMap::from([
-        (NAME_LABEL.to_string(), kind.to_ascii_lowercase()),
-        (
-            INSTANCE_LABEL.to_string(),
-            format!("{}-{name}", kind.to_ascii_lowercase()),
-        ),
-        (MANAGED_BY_LABEL.to_string(), MANAGER.to_string()),
-    ])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use kube::core::CustomResourceExt;
-
-    #[test]
-    fn test_crd_spec_change() {
-        let new = serde_json::to_value(Webpage::crd()).unwrap();
-        let current: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open("manifests/crd.json").unwrap()).unwrap();
-
-        pretty_assertions::assert_eq!(new, current, "crd changed. run `make crd` to regenerate.");
     }
 }

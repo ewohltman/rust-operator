@@ -6,7 +6,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rust_operator::init_tracing_default()?;
+    rust_operator::init_tracing_default(false)?;
 
     let Some(plural) = std::env::args().nth(1) else {
         return Err(anyhow::anyhow!("no resource provided"));
