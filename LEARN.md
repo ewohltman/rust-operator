@@ -46,7 +46,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     9. First controller
 - [x] 
     10. Manage child resources
-- [ ] 
+- [x] 
     11. Status and conditions
 - [ ] 
     12. Errors, retries, and Events
