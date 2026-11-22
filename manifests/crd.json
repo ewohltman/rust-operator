@@ -35,7 +35,7 @@
                 "properties": {
                   "html": {
                     "description": "The HTML document to serve as `index.html`.",
-                    "maxLength": 102400,
+                    "maxLength": 1000000,
                     "type": "string"
                   },
                   "replicas": {

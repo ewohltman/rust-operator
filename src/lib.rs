@@ -10,14 +10,12 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     Condition, LabelSelector, ObjectMeta, OwnerReference, Time,
 };
-use kube::runtime::controller::Action;
+use kube::runtime::events::Recorder;
 use kube::{Client, CustomResource, Resource};
 use kube::{ResourceExt, config};
 use schemars::{JsonSchema, json_schema};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 /// A static web page served by nginx.
@@ -44,7 +42,7 @@ use tracing_subscriber::EnvFilter;
 #[serde(rename_all = "camelCase")]
 pub struct WebpageSpec {
     /// The HTML document to serve as `index.html`.
-    #[schemars(length(max = 102_400))]
+    #[schemars(length(max = MAX_HTML_BYTES))]
     #[kube(validation = Rule::new("self.lowerAscii().startsWith('<!doctype html>')").message("not a full HTML document")
     )]
     pub html: String,
@@ -117,39 +115,70 @@ pub enum Error {
     CurrentContextNotKind(String),
 }
 
-/// Define a unique DNS-style finalizer name.
-pub const FINALIZER_NAME: &str = "demo.ephemeral-roles.net/finalizer";
-
-pub const NAME_LABEL: &str = "app.kubernetes.io/name";
-
-pub const INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
-
-pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
-
 pub const MANAGER: &str = "rust-operator";
+pub const MAX_HTML_BYTES: usize = 1_000_000;
+pub const NAME_LABEL: &str = "app.kubernetes.io/name";
+pub const INSTANCE_LABEL: &str = "app.kubernetes.io/instance";
+pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+pub const FINALIZER_NAME: &str = "demo.ephemeral-roles.net/finalizer";
 
 pub type ReconcileResult<T, E = ReconcileError> = std::result::Result<T, E>;
 
 /// Errors returned by this module.
 #[derive(thiserror::Error, Debug)]
 pub enum ReconcileError {
-    #[error("namespace not set")]
-    EmptyNamespace,
+    #[error("permanent error: {0}")]
+    PermanentError(#[from] PermanentError),
 
-    #[error("desired namespace name not set")]
-    EmptyDesiredNamespace,
+    #[error("transient error: {0}")]
+    TransientError(#[from] TransientError),
+}
 
+#[derive(thiserror::Error, Debug)]
+pub enum PermanentError {
     #[error("controller owner reference not set")]
     EmptyControllerOwnerReference,
 
-    #[error(transparent)]
-    Api(#[from] kube::Error),
+    #[error("namespace not set")]
+    EmptyNamespace,
 
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum TransientError {
+    #[error("error getting namespace: {0}")]
+    GetNamespace(#[source] kube::Error),
+
+    #[error("error getting deployment: {0}")]
+    GetDeployment(#[source] kube::Error),
+
+    #[error("error getting webpage: {0}")]
+    GetWebpage(#[source] kube::Error),
+
+    #[error("error applying {kind} to {target}: {source}")]
+    Patch {
+        kind: String,
+        target: String,
+        #[source]
+        source: Box<kube::Error>,
+    },
+
+    #[error("error applying {kind} status to {target}: {source}")]
+    PatchStatus {
+        kind: String,
+        target: String,
+        #[source]
+        source: Box<kube::Error>,
+    },
+
+    #[error("error publishing event: {0}")]
+    PublishEvent(#[source] kube::Error),
+}
+
 pub struct Context {
+    pub recorder: Recorder,
     pub client: Client,
 }
 
@@ -183,18 +212,12 @@ pub fn managed_by_label_selector() -> String {
     format!("{MANAGED_BY_LABEL}={MANAGER}")
 }
 
-#[tracing::instrument(skip(_wp, _ctx))]
-pub fn error_policy(_wp: Arc<Webpage>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
-    Action::requeue(Duration::from_secs(5))
-}
-
 /// Returns a Kube config if current context is set to a kind cluster.
 ///
 /// # Errors
 ///
 /// Returns an `Err` if the file cannot be read, current context is not set, or
 /// if the current context does not start with 'kind-'.
-#[tracing::instrument]
 pub fn kind_cluster_guard() -> Result<config::Kubeconfig> {
     let config = config::Kubeconfig::read()?;
     match &config.current_context {
@@ -370,10 +393,20 @@ pub fn new_http_route(name: &str, controller_ref: &OwnerReference) -> HttpRoute 
 const CONDITION_STATUS_UNKNOWN: &str = "Unknown";
 const CONDITION_STATUS_TRUE: &str = "True";
 const CONDITION_STATUS_FALSE: &str = "False";
+pub const CONDITION_REASON_HTML_TOO_LARGE: &str = "HtmlTooLarge";
 const CONDITION_REASON_WAITING: &str = "Waiting";
 const CONDITION_REASON_PROGRESSING: &str = "Progressing";
 const CONDITION_REASON_READY: &str = "Ready";
-const CONDITION_TYPE: &str = "Ready";
+pub const CONDITION_TYPE: &str = "Ready";
+
+/// Returns the `Ready` condition from a status, if it has one.
+#[must_use]
+pub fn ready_condition(wp_status: &WebpageStatus) -> Option<&Condition> {
+    wp_status
+        .conditions
+        .iter()
+        .find(|c| c.type_ == CONDITION_TYPE)
+}
 
 #[must_use]
 pub fn new_status(
@@ -381,43 +414,61 @@ pub fn new_status(
     wp_status: &WebpageStatus,
     dep_status: &DeploymentStatus,
 ) -> WebpageStatus {
-    let old = wp_status
-        .conditions
-        .iter()
-        .find(|c| c.type_ == CONDITION_TYPE);
-
-    WebpageStatus {
-        ready_replicas: dep_status.ready_replicas.unwrap_or_default(),
-        observed_generation: wp.metadata.generation,
-        conditions: vec![new_condition(wp, dep_status, old)],
-    }
-}
-
-fn new_condition(
-    wp: &Webpage,
-    dep_status: &DeploymentStatus,
-    old: Option<&Condition>,
-) -> Condition {
     let (status, reason) = match (
         dep_status.observed_generation,
-        dep_status.ready_replicas.unwrap_or(0),
+        dep_status.ready_replicas.unwrap_or_default(),
     ) {
         (None, _) => (CONDITION_STATUS_UNKNOWN, CONDITION_REASON_WAITING),
         (_, r) if r == wp.spec.replicas => (CONDITION_STATUS_TRUE, CONDITION_REASON_READY),
         _ => (CONDITION_STATUS_FALSE, CONDITION_REASON_PROGRESSING),
     };
 
+    WebpageStatus {
+        ready_replicas: dep_status.ready_replicas.unwrap_or_default(),
+        observed_generation: wp.metadata.generation,
+        conditions: vec![new_condition(
+            wp.metadata.generation,
+            ready_condition(wp_status),
+            status.to_string(),
+            reason.to_string(),
+            format!("https://{}.ephemeral-roles.net", wp.name_any()),
+        )],
+    }
+}
+
+#[must_use]
+pub fn new_too_large_status(wp: &Webpage, wp_status: &WebpageStatus) -> WebpageStatus {
+    WebpageStatus {
+        ready_replicas: 0,
+        observed_generation: wp.metadata.generation,
+        conditions: vec![new_condition(
+            wp.metadata.generation,
+            ready_condition(wp_status),
+            CONDITION_STATUS_FALSE.to_string(),
+            CONDITION_REASON_HTML_TOO_LARGE.to_string(),
+            format!("html is {} bytes, max {MAX_HTML_BYTES}", wp.spec.html.len()),
+        )],
+    }
+}
+
+fn new_condition(
+    observed_generation: Option<i64>,
+    old: Option<&Condition>,
+    status: String,
+    reason: String,
+    message: String,
+) -> Condition {
     Condition {
+        type_: CONDITION_TYPE.to_string(),
         // only move the timestamp when status flips
         last_transition_time: old.filter(|c| c.status == status).map_or_else(
             || Time(k8s_openapi::jiff::Timestamp::now()),
             |c| c.last_transition_time.clone(),
         ),
-        observed_generation: wp.metadata.generation,
-        message: format!("https://{}.ephemeral-roles.net", wp.name_any()),
-        reason: reason.to_string(),
-        status: status.to_string(),
-        type_: CONDITION_TYPE.to_string(),
+        observed_generation,
+        status,
+        reason,
+        message,
     }
 }
 
@@ -456,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_namespace() {
+    fn test_new_namespace() {
         let (_, controller_ref) = new_webpage_controller_ref();
         let namespace = new_namespace(NAME, &controller_ref);
         assert_eq!(namespace.metadata.name.unwrap(), EXPECTED_NAMESPACE);
@@ -468,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_object_meta() {
+    fn test_new_object_meta() {
         let (_, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
         let om = new_object_meta(NAME, &owner_ref);
@@ -478,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_config_map() {
+    fn test_new_config_map() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
         let cm = new_config_map(&wp, NAME, &owner_ref);
@@ -486,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_deployment() {
+    fn test_new_deployment() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
         let dep = new_deployment(&wp, NAME, &owner_ref);
@@ -494,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_service() {
+    fn test_new_service() {
         let (wp, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
         let service = new_service(NAME, &owner_ref);
@@ -516,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn test_desired_http_route() {
+    fn test_new_http_route() {
         let (_, controller_ref) = new_webpage_controller_ref();
         let (_, owner_ref) = new_namespace_controller_ref(NAME, &controller_ref);
 
@@ -568,21 +619,6 @@ mod tests {
     fn test_new_status() {
         let (mut wp, _) = new_webpage_controller_ref();
         wp.metadata.generation = Some(GENERATION);
-        let dep_status = new_deployment_status(Some(1), Some(EXPECTED_REPLICAS));
-
-        let status = new_status(&wp, &WebpageStatus::default(), &dep_status);
-        assert_eq!(status.ready_replicas, EXPECTED_REPLICAS);
-        assert_eq!(status.observed_generation, Some(GENERATION));
-        assert_eq!(status.conditions.len(), 1);
-        assert_eq!(status.conditions[0].type_, CONDITION_TYPE);
-        assert_eq!(status.conditions[0].status, CONDITION_STATUS_TRUE);
-    }
-
-    #[test]
-    fn test_new_condition() {
-        let (mut wp, _) = new_webpage_controller_ref();
-        wp.metadata.generation = Some(GENERATION);
-
         let cases = [
             (
                 None,
@@ -611,23 +647,45 @@ mod tests {
         ];
         for (observed_generation, ready_replicas, status, reason) in cases {
             let dep_status = new_deployment_status(observed_generation, ready_replicas);
-            let condition = new_condition(&wp, &dep_status, None);
+            let wp_status = new_status(&wp, &WebpageStatus::default(), &dep_status);
+            assert_eq!(wp_status.ready_replicas, ready_replicas.unwrap_or_default());
+            assert_eq!(wp_status.observed_generation, Some(GENERATION));
+            assert_eq!(wp_status.conditions.len(), 1);
+            let condition = &wp_status.conditions[0];
+            assert_eq!(condition.type_, CONDITION_TYPE);
             assert_eq!(condition.status, status);
             assert_eq!(condition.reason, reason);
-            assert_eq!(condition.type_, CONDITION_TYPE);
             assert_eq!(condition.observed_generation, Some(GENERATION));
             assert_eq!(
                 condition.message,
                 format!("https://{NAME}.ephemeral-roles.net")
             );
         }
+    }
+
+    #[test]
+    fn test_new_too_large_status() {
+        let (mut wp, _) = new_webpage_controller_ref();
+        wp.metadata.generation = Some(GENERATION);
+
+        let status = new_too_large_status(&wp, &WebpageStatus::default());
+        assert_eq!(status.conditions[0].status, CONDITION_STATUS_FALSE);
+        assert_eq!(status.conditions[0].reason, CONDITION_REASON_HTML_TOO_LARGE);
+    }
+
+    #[test]
+    fn test_new_condition() {
+        let (mut wp, _) = new_webpage_controller_ref();
+        wp.metadata.generation = Some(GENERATION);
 
         // the transition time is kept while the status is unchanged and moves when it flips
         let old_time = Time(k8s_openapi::jiff::Timestamp::UNIX_EPOCH);
         let old = new_condition(
-            &wp,
-            &new_deployment_status(Some(1), Some(EXPECTED_REPLICAS)),
+            wp.metadata.generation,
             None,
+            CONDITION_STATUS_FALSE.to_string(),
+            String::new(),
+            String::new(),
         );
         let old = Condition {
             last_transition_time: old_time.clone(),
@@ -635,13 +693,21 @@ mod tests {
         };
 
         let same = new_condition(
-            &wp,
-            &new_deployment_status(Some(1), Some(EXPECTED_REPLICAS)),
+            wp.metadata.generation,
             Some(&old),
+            CONDITION_STATUS_FALSE.to_string(),
+            String::new(),
+            String::new(),
         );
         assert_eq!(same.last_transition_time, old_time);
 
-        let flipped = new_condition(&wp, &new_deployment_status(Some(1), Some(1)), Some(&old));
+        let flipped = new_condition(
+            wp.metadata.generation,
+            Some(&old),
+            CONDITION_STATUS_TRUE.to_string(),
+            String::new(),
+            String::new(),
+        );
         assert_ne!(flipped.last_transition_time, old_time);
     }
 
@@ -668,7 +734,7 @@ mod tests {
 
         let controller_ref = wp
             .controller_owner_ref(&())
-            .ok_or(ReconcileError::EmptyControllerOwnerReference)
+            .ok_or(PermanentError::EmptyControllerOwnerReference)
             .unwrap();
 
         (wp, controller_ref)
@@ -684,7 +750,7 @@ mod tests {
         (
             ns.clone(),
             ns.controller_owner_ref(&())
-                .ok_or(ReconcileError::EmptyControllerOwnerReference)
+                .ok_or(PermanentError::EmptyControllerOwnerReference)
                 .unwrap_or_default(),
         )
     }

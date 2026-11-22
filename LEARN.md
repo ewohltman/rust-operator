@@ -48,7 +48,7 @@ Deployment, and Service, keeps them in sync, and reports status back on the `Web
     10. Manage child resources
 - [x] 
     11. Status and conditions
-- [ ] 
+- [x] 
     12. Errors, retries, and Events
 - [ ] 
     13. Finalizers
