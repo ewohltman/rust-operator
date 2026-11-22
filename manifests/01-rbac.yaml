@@ -35,10 +35,9 @@ rules:
   - apiGroups: [ "gateway.networking.k8s.io" ]
     resources: [ "httproutes" ]
     verbs: [ "get", "list", "watch", "create", "patch" ]
-  # Add when Events land (step 12):
-  # - apiGroups: ["events.k8s.io"]
-  #   resources: ["events"]
-  #   verbs: ["create", "patch"]
+  - apiGroups: [ "events.k8s.io" ]
+    resources: [ "events" ]
+    verbs: [ "create", "patch" ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
